@@ -3,6 +3,8 @@ together and actually succeed in communicating.
 
 Usage::
 
+    pip install blessings pyelasticsearch
+
     PYTHONPATH=.. python state_histogram.py 2015-05-26  # do a specific date
 
     PYTHONPATH=.. python state_histogram.py  # do today
