@@ -1,6 +1,12 @@
 """Determine how often it occurs that 2 people are attempting to be in a room
 together and actually succeed in communicating.
 
+Usage::
+
+    PYTHONPATH=.. python play.py 2015-05-26  # do a specific date
+
+    PYTHONPATH=.. python play.py  # do today
+
 Specifically, when join-leave spans overlap in a room, what is the furthest
 state the link-clicker reaches (since we can't tell how far the built-in
 client gets, and sendrecv implies at least one party has bidirectional flow)?
@@ -23,15 +29,14 @@ Idealized state sequences for the 2 different types of clients::
 
 """
 from collections import OrderedDict
+from datetime import datetime
 from itertools import groupby
 import json
 from textwrap import wrap
-from sys import stdout
+from sys import argv
 
 from blessings import Terminal
 from pyelasticsearch import ElasticSearch
-
-from hello_stats.settings import es_url, es_username, es_password
 
 
 class StateCounter(object):
@@ -226,7 +231,9 @@ def furthest_state(events):
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
-def main():
+def main(iso_date):
+    """Compute a furthest-state histogram for the given date."""
+
     def print_wrapped(text):
         print '\n'.join(wrap(text, term.width))
 
@@ -238,8 +245,10 @@ def main():
                        password=es_password,
                        timeout=600)
 
+    print "Computing furthest-state histogram for %s..." % iso_date
+
     # Get the day's records sorted by room token then Timestamp:
-    events = logs_from_day('2015-05-31', es)  #, size=10000)
+    events = logs_from_day(iso_date, es)  #, size=10000)
     for token, events in groupby(events, lambda l: l.token):
         # For one room token...
         events = list(events)  # prevent suffering
@@ -259,7 +268,12 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        from hello_stats.settings import es_url, es_username, es_password
+    except ImportError:
+        print 'Please edit settings.py before running me.'
+    else:
+        main(argv[1] if len(argv) >= 2 else datetime.now().date().isoformat())
 
 
 # Observations:
