@@ -111,7 +111,7 @@ class Event(object):
     def __str__(self):
         return '<%s %s by %s from %s at %s>' % (
             self.__class__.__name__,
-            self.token, 'clicker ' if self.is_clicker else 'built-in',
+            self.token, 'clicker' if self.is_clicker else 'built-in',
             self.hostname,
             self.timestamp)
 
@@ -167,10 +167,6 @@ class WeirdData(Exception):
     pass
 
 
-class LeaveBeforeJoin(WeirdData):
-    pass
-
-
 def people_meet_in(events):
     """Return whether there were ever 2 people in a room simultaneously.
 
@@ -179,20 +175,23 @@ def people_meet_in(events):
     """
     # Do any link-clicker join/leave spans overlap with built-in ones?
     # Play back join/leave activity, assuming each event happens at a unique time (which should be close enough to true) and seeing if any build-in client (of which there should be only 1) is in the room when any link-clicker (of which there might be multiple though theoretically no more than 1 at once) is.
-    built_ins = set()  # {ip, ...}
-    clickers = set()
+    built_in = False  # whether there's a built-in client in the room
+    clicker = False  # whether there's a link-clicker
 
     for event in events:
-        whichever_set = clickers if event.is_clicker else built_ins
-        if isinstance(event, Join):
-            whichever_set.add(event.hostname)
-            if clickers and built_ins:
+        if isinstance(event, (Join, Refresh)):  # Assumption: Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
+            if event.is_clicker:
+                clicker = True
+            else:
+                built_in = True
+
+            if clicker and built_in:
                 return True
         elif isinstance(event, Leave):
-            try:
-                whichever_set.remove(event.hostname)
-            except KeyError as exc:
-                raise LeaveBeforeJoin  # TODO: Maybe tolerate this.
+            if event.is_clicker:
+                clicker = False
+            else:
+                built_in = False
 
             # TODO: Think about reporting bad data if a session gets to sendrecv *without* 2 people being in the room. That would be weird (and likely chalked up to timestamp slop).
     return False
@@ -212,7 +211,7 @@ def furthest_state(events):
 
 def main():
     term = Terminal()
-    counter = StateCounter(['waiting', 'starting', 'receiving', 'sending', 'sendrecv', 'weird'])
+    counter = StateCounter(['refresh', 'leave', 'join', 'waiting', 'starting', 'receiving', 'sending', 'sendrecv', 'weird'])
     weird_counter = StateCounter()
     es = ElasticSearch(es_url,
                        username=es_username,
@@ -251,4 +250,10 @@ if __name__ == '__main__':
 #   generally a mix of clickers and built-ins. Where are the joins? On a
 #   previous day?
 # * Where are all the sendrecvs? Does furthest_state work right?
-# * What's with all these LeaveBeforeJoins?
+# * It would be great to have the sessionIDs in there so we could distinguish
+#   individual link-clickers. hostname is the IP of the server, not of the
+#   client.
+# * There are tons of sessions in which leaves happen without symmetric joins.
+#   That's okay, but it means we're probably going to have to analyze more
+#   than one day at once to build up a good representation of the
+#   who's-in-which-rooms state. Or, better yet, treat Refreshes as Joins.
