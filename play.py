@@ -1,23 +1,31 @@
-"""Proposed questions to answer: (Bounce these off Adam.)
+"""Determine how often it occurs that 2 people are attempting to be in a room
+together and actually succeed in communicating.
 
-* What portion of users ever reach the send or recv states? This should indicate whether Moz's part of the setup succeeded. Do we already have this?
-* How often does it occur that 2 people are attempting to be in a room (join----leave spans overlap)
-(init->waiting->starting->sending/receiving and not timed out or otherwise disconnected (if we can tell)) but don't reach sendrecv so they can talk to each other?
-* When join---leave spans overlap in a room, what is the furthest state the link-clicker reaches (since we can't tell how far the built-in client gets, and sendrecv implies at least one party has bidirectional flow)? count(*) those. Later: for *each* overlapping join---leave pair in a room, answer the same question.
+Specifically, when join-leave spans overlap in a room, what is the furthest
+state the link-clicker reaches (since we can't tell how far the built-in
+client gets, and sendrecv implies at least one party has bidirectional flow)?
+We draw a histogram of the answer to that question.
 
-Unregistered/Registered:
-    action = join refresh* leave
-    state = <none>
-Link-clicker:
-    action = join (status / refresh)+ leave
-    state = waiting starting receiving sending? sendrecv  # These can come out of order due to varying latencies in transports.
+Possible later enhancement: for *each* overlapping join-leave pair in a room,
+answer the same question.
 
-Iff action=status, there's a state.
+Idealized state sequences for the 2 different types of clients::
+
+    Unregistered/Registered:
+        action = join refresh* leave
+        state = <none>
+
+    Link-clicker:
+        action = join (status / refresh)+ leave
+        state = waiting starting receiving sending? sendrecv  # These can come out of order due to varying latencies in transports.
+
+    Iff action=status, there's a state.
 
 """
 from collections import OrderedDict
 from itertools import groupby
 import json
+from textwrap import wrap
 from sys import stdout
 
 from blessings import Terminal
@@ -53,6 +61,9 @@ class StateCounter(object):
         """Distribute 100 stars over all the state, modulo rounding errors."""
         return self.histogram()
 
+    def __nonzero__(self):
+        return self.total != 0
+
 
 def logs_from_day(iso_date, es, size=1000000):
     """Return all Events from the given day, in order by room token and then
@@ -77,7 +88,7 @@ def logs_from_day(iso_date, es, size=1000000):
         },
         'sort': ['token', 'Timestamp'],
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
-        '_source': {'include': ['action', 'token', 'userType', 'state', 'hostname', 'Timestamp']}
+        '_source': {'include': ['action', 'token', 'userType', 'state', 'Timestamp']}
     },
     index='loop-app-logs-%s' % iso_date,
     doc_type='request.summary')['hits']['hits']
@@ -88,12 +99,12 @@ def logs_from_day(iso_date, es, size=1000000):
         try:
             class_ = EVENT_CLASSES[action_and_state]
         except KeyError:
-            print "Unexpected action/state pair: %s" % (action_and_state,)
+            if action_and_state != ('status', None):  # We know about this one already.
+                print "Unexpected action/state pair: %s" % (action_and_state,)
             continue
         yield class_(
             token=source['token'],
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
-            hostname=source['hostname'].lstrip('ip-'),
             timestamp=source['Timestamp'])
 
 
@@ -102,17 +113,15 @@ class Event(object):
     # progression through the room states, culminating in sendrecv. Everything
     # is pretty arbitrary except that SendRecv has the max.
 
-    def __init__(self, token, is_clicker, hostname, timestamp):
+    def __init__(self, token, is_clicker, timestamp):
         self.token = token
         self.is_clicker = is_clicker
-        self.hostname = hostname
         self.timestamp = timestamp  # just for debugging
 
     def __str__(self):
-        return '<%s %s by %s from %s at %s>' % (
+        return '<%s %s by %s at %s>' % (
             self.__class__.__name__,
             self.token, 'clicker' if self.is_clicker else 'built-in',
-            self.hostname,
             self.timestamp)
 
     def __repr__(self):
@@ -164,19 +173,27 @@ EVENT_CLASSES = {
 
 
 class WeirdData(Exception):
-    pass
+    """There was something unexpected about the data that we want to count in
+    a bucket."""
 
 
 def people_meet_in(events):
     """Return whether there were ever 2 people in a room simultaneously.
 
+    In other words, do any link-clicker join/leave spans overlap with built-in
+    ones?
+
     :arg events: All the logged Events from the room, in time order
 
     """
-    # Do any link-clicker join/leave spans overlap with built-in ones?
-    # Play back join/leave activity, assuming each event happens at a unique time (which should be close enough to true) and seeing if any build-in client (of which there should be only 1) is in the room when any link-clicker (of which there might be multiple though theoretically no more than 1 at once) is.
+    # Play back join/leave activity, assuming each event happens at a unique
+    # time (which should be close enough to true, since we log to the
+    # thousandth of a sec) and seeing if any built-in client (of which there
+    # should be only 1) is in the room when any link-clicker (of which there
+    # might be multiple though theoretically no more than 1 at a time) is.
+
     built_in = False  # whether there's a built-in client in the room
-    clicker = False  # whether there's a link-clicker
+    clicker = False  # whether there's a link-clicker in the room
 
     for event in events:
         if isinstance(event, (Join, Refresh)):  # Assumption: Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
@@ -200,8 +217,8 @@ def people_meet_in(events):
     # TODO: Maybe pay attention to GET requests.
 
 
-NUM_TO_STATE = [cls.__name__.lower() for cls in
-                sorted(EVENT_CLASSES.values(), key=lambda e: e.state_num)]
+NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
+                for cls in EVENT_CLASSES.values()}
 
 
 def furthest_state(events):
@@ -210,8 +227,11 @@ def furthest_state(events):
 
 
 def main():
+    def print_wrapped(text):
+        print '\n'.join(wrap(text, term.width))
+
     term = Terminal()
-    counter = StateCounter(['refresh', 'leave', 'join', 'waiting', 'starting', 'receiving', 'sending', 'sendrecv', 'weird'])
+    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting', 'receiving', 'sending', 'sendrecv'])
     weird_counter = StateCounter()
     es = ElasticSearch(es_url,
                        username=es_username,
@@ -219,7 +239,7 @@ def main():
                        timeout=600)
 
     # Get the day's records sorted by room token then Timestamp:
-    events = logs_from_day('2015-06-01', es, size=10000)
+    events = logs_from_day('2015-05-31', es)  #, size=10000)
     for token, events in groupby(events, lambda l: l.token):
         # For one room token...
         events = list(events)  # prevent suffering
@@ -229,15 +249,13 @@ def main():
         except WeirdData as exc:
             counter.incr('weird')
             weird_counter.incr(exc.__class__)
-    #print term.clear
 
-    print "Of rooms in which there were ever 2 people simultaneously, here is the furthest state reached by the link-clicker. (The link-clicker's states are easier to track. \"Further\" states are toward the bottom of the histogram.)"
+    print_wrapped("Of rooms in which there were ever 2 people simultaneously, here are the furthest states reached by the link-clicker. (The link-clicker's state is easier to track. \"Further\" states are toward the bottom of the histogram.)")
     print counter, '\n'
 
-    print "A breakdown of the weird data:"
-    print weird_counter, '\n'
-
-    #stdout.flush()
+    if weird_counter:
+        print_wrapped("A breakdown of the weird data:")
+        print weird_counter, '\n'
 
 
 if __name__ == '__main__':
@@ -245,15 +263,20 @@ if __name__ == '__main__':
 
 
 # Observations:
-# * Most rooms never see 2 people meet.
-# * There are several sessions consisting of nothing by Refresh events,
+#
+# * Most rooms never see 2 people meet: 20K lonely rooms vs. 1500 meeting ones.
+# * There are many sessions consisting of nothing by Refresh events,
 #   generally a mix of clickers and built-ins. Where are the joins? On a
-#   previous day?
-# * Where are all the sendrecvs? Does furthest_state work right?
-# * It would be great to have the sessionIDs in there so we could distinguish
-#   individual link-clickers. hostname is the IP of the server, not of the
-#   client.
-# * There are tons of sessions in which leaves happen without symmetric joins.
-#   That's okay, but it means we're probably going to have to analyze more
-#   than one day at once to build up a good representation of the
-#   who's-in-which-rooms state. Or, better yet, treat Refreshes as Joins.
+#   previous day? It would be interesting to see if these happen near the
+#   beginnings of days.
+# * There are some sessions in which leaves happen without symmetric joins.
+#   See if these occur near the beginning of days. Otherwise, I would expect
+#   at least Refreshes every 5 minutes.
+# * There are about 60 action=status state=<empty> pairs in each day's logs.
+#   What do those mean, if anything?
+# * These numbers may be a little high because we're assuming all
+#   link-clickers are the same link-clicker. When we start logging sessionID,
+#   we can start distinguishing them. (hostname is the IP of the server, not
+#   of the client.)
+# * These numbers may be a little low because we don't yet notice timeouts
+#   (client crashes, etc.), making the denominator falsely high.
