@@ -3,9 +3,9 @@ together and actually succeed in communicating.
 
 Usage::
 
-    PYTHONPATH=.. python play.py 2015-05-26  # do a specific date
+    PYTHONPATH=.. python state_histogram.py 2015-05-26  # do a specific date
 
-    PYTHONPATH=.. python play.py  # do today
+    PYTHONPATH=.. python state_histogram.py  # do today
 
 Specifically, when join-leave spans overlap in a room, what is the furthest
 state the link-clicker reaches (since we can't tell how far the built-in
