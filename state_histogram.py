@@ -87,7 +87,7 @@ def logs_from_day(iso_date, es, size=1000000):
                 'filter': {
                     'and': [
                         {'term': {'path': 'rooms'}},  # Assumption: "rooms" doesn't show up as a token (it's too short).
-                        {'term': {'method': 'post'}},  # TODO: Would it help us calculate better timeouts to pay attention to GETs, or do they happen only early in the session?
+                        {'term': {'method': 'post'}},  # GETs are not usefully related to state flow.
                         {'exists': {'field': 'token'}}  # Assumption: token property is never present when unpopulated.
                     ]
                 }
@@ -203,6 +203,9 @@ def people_meet_in(events):
     clicker = False  # whether there's a link-clicker in the room
 
     for event in events:
+        # Assumption: There is <=1 link-clicker and <=1 built-in client in
+        # each room. This is not actually strictly true: it is possible for 2
+        # browsers to join if they're signed into the same FF Account.
         if isinstance(event, (Join, Refresh)):  # Assumption: Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
             if event.is_clicker:
                 clicker = True
@@ -217,6 +220,15 @@ def people_meet_in(events):
             else:
                 built_in = False
 
+        # clicker + build_in can be unequal to the "participants" field of the
+        # log entry because I'm applying the rule "Only 1 built-in client at a
+        # time in a room", and the app server isn't. For instance, in a series
+        # of logs wherein a built-in joins, refreshes, and then presumably
+        # crashes and joins again (or another copy of the browser joins using
+        # the same FF account), the participant field goes up to 2. Another
+        # possibility happens shortly after midnight, when the index rolls
+        # over but people are still in rooms.
+
             # TODO: Think about reporting bad data if a session gets to sendrecv *without* 2 people being in the room. That would be weird (and likely chalked up to timestamp slop).
     return False
 
@@ -230,6 +242,8 @@ NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
 
 def furthest_state(events):
     """Return the closest state to sendrecv reached in a series of events."""
+    # TODO: In Firefox 40 and up, we start sending state events from the
+    # built-in client, so demand a sendrecv from both users.
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
@@ -289,7 +303,7 @@ if __name__ == '__main__':
 #   See if these occur near the beginning of days. Otherwise, I would expect
 #   at least Refreshes every 5 minutes.
 # * There are about 60 action=status state=<empty> pairs in each day's logs.
-#   What do those mean, if anything?
+#   What do those mean, if anything? They're all errors. Filter out bad HTTP status codes.
 # * These numbers may be a little high because we're assuming all
 #   link-clickers are the same link-clicker. When we start logging sessionID,
 #   we can start distinguishing them. (hostname is the IP of the server, not
