@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 from itertools import groupby
 import json
 from os import environ
+from os.path import dirname, join
 from textwrap import wrap
 from sys import argv
 
@@ -259,6 +260,7 @@ def main(iso_date, es_url, es_username, es_password):
     es = ElasticSearch(es_url,
                        username=es_username,
                        password=es_password,
+                       ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
 
     print "Computing furthest-state histogram for %s..." % iso_date
