@@ -1,13 +1,12 @@
+#!/usr/bin/env python
 """Determine how often it occurs that 2 people are attempting to be in a room
 together and actually succeed in communicating.
 
 Usage::
 
-    pip install blessings pyelasticsearch
+    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py 2015-05-26  # do a specific date
 
-    PYTHONPATH=.. python state_histogram.py 2015-05-26  # do a specific date
-
-    PYTHONPATH=.. python state_histogram.py  # do today
+    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py  # do yesterday
 
 Specifically, when join-leave spans overlap in a room, what is the furthest
 state the link-clicker reaches (since we can't tell how far the built-in
@@ -31,9 +30,10 @@ Idealized state sequences for the 2 different types of clients::
 
 """
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import groupby
 import json
+from os import environ
 from textwrap import wrap
 from sys import argv
 
@@ -247,7 +247,7 @@ def furthest_state(events):
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
-def main(iso_date):
+def main(iso_date, es_url, es_username, es_password):
     """Compute a furthest-state histogram for the given date."""
 
     def print_wrapped(text):
@@ -284,12 +284,9 @@ def main(iso_date):
 
 
 if __name__ == '__main__':
-    try:
-        from hello_stats.settings import es_url, es_username, es_password
-    except ImportError:
-        print 'Please edit settings.py before running me.'
-    else:
-        main(argv[1] if len(argv) >= 2 else datetime.now().date().isoformat())
+    date = (argv[1] if len(argv) >= 2
+            else (datetime.now() - timedelta(days=1)).date().isoformat())
+    main(date, environ['ES_URL'], environ['ES_USERNAME'], environ['ES_PASSWORD'])
 
 
 # Observations:

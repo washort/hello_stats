@@ -1,0 +1,24 @@
+# sha256: 7cVxMGHxCWYEi_a0DZpRSzgeC6hJxk4DTE72wYR9MAc
+blessings==1.6
+
+# sha256: Jo-gDCfedW1xZj3WH3OkqNhydWm7G0dLLOYCBVOCaHI
+# sha256: mXhebPcVzc3lne4FpnbpnwSDWnHnztIByjF0AcMiupY
+certifi==2015.04.28
+
+# sha256: hmHkF0e4hcES2UK1KP7D6W4QNrXGcTqmBfL-JLYYRsI
+# sha256: kMhZbpZK95ApZS0nNEIDVZkGZxRrghHyQPmci0MrC6w
+elasticsearch==1.6.0
+
+# sha256: P3_IGWFR8-lX93QnSM4qVkdJLYoLtxuk-a8a6_-mbUE
+pyelasticsearch==1.3
+
+# sha256: KjGJ950ce4ohSaDng8C0IX-tmzCm59YEUPJVPcLA5X4
+simplejson==3.6.5
+
+# sha256: QYqTw5en7asj5ViNvAZ6x0pyPts9VBvUk295R252Rdo
+# sha256: 4kBSQR_E-9H2cmNVN8P8IzDZSBsYwDF2lbRiWVEskdU
+six==1.9.0
+
+# sha256: g0wCoeekicCbmUBFGKhARyZnTHWpijqLxf5XI4v2MQE
+# sha256: JbSn-72REuAZDzH4h3qgUjyuq4YwhyrRu92roBzdZZk
+urllib3==1.10
