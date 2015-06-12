@@ -1,5 +1,6 @@
-# sha256: 7cVxMGHxCWYEi_a0DZpRSzgeC6hJxk4DTE72wYR9MAc
-blessings==1.6
+# sha256: 2Qg_keId-FDIE7ODWNyD3xbX8lMYChNE7P7c4kIT7PI
+# sha256: dYSYx38W4muLYa8m-NDbsRm3E_LY0WZoHsiSMR81IMQ
+boto==2.38.0
 
 # sha256: Jo-gDCfedW1xZj3WH3OkqNhydWm7G0dLLOYCBVOCaHI
 # sha256: mXhebPcVzc3lne4FpnbpnwSDWnHnztIByjF0AcMiupY

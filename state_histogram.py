@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 """Determine how often it occurs that 2 people are attempting to be in a room
-together and actually succeed in communicating.
+together and actually succeed in communicating. Write that data to an S3
+bucket so a dashboard can pull it out.
 
 Usage::
 
-    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py 2015-05-26  # do a specific date
-
-    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py  # do yesterday
+    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py
 
 Specifically, when join-leave spans overlap in a room, what is the furthest
 state the link-clicker reaches (since we can't tell how far the built-in
@@ -30,16 +29,25 @@ Idealized state sequences for the 2 different types of clients::
 
 """
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from itertools import groupby
 import json
 from os import environ
 from os.path import dirname, join
-from textwrap import wrap
-from sys import argv
 
-from blessings import Terminal
+from boto import connect_s3
+from boto.s3.key import Key
 from pyelasticsearch import ElasticSearch
+
+
+# Update this, and the next update will wipe out all saved data and start from
+# scratch. A good reason to do this is if you improve the accuracy of the
+# computations.
+VERSION = 1
+
+# The first date for which data for this metric was available in ES. Before
+# this, the userType field is missing.
+BEGINNING_OF_TIME = date(2015, 4, 30)
 
 
 class StateCounter(object):
@@ -56,6 +64,7 @@ class StateCounter(object):
         self.total += 1
 
     def histogram(self, stars=100):
+        """Return an ASCII-art bar chart for debugging and exploration."""
         ret = []
         STARS = 100
         for state, count in self.d.iteritems():
@@ -69,11 +78,15 @@ class StateCounter(object):
         """Distribute 100 stars over all the state, modulo rounding errors."""
         return self.histogram()
 
+    def as_dict(self):
+        """Return a dictionary with a key for total and for every bucket."""
+        return dict(total=self.total, **self.d)
+
     def __nonzero__(self):
         return self.total != 0
 
 
-def logs_from_day(iso_date, es, size=1000000):
+def logs_from_day(iso_day, es, size=1000000):
     """Return all Events from the given day, in order by room token and then
     timestamp."""
     # Optimize: Can I do this with aggregations and/or scripts or at least use
@@ -98,7 +111,7 @@ def logs_from_day(iso_date, es, size=1000000):
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
         '_source': {'include': ['action', 'token', 'userType', 'state', 'Timestamp']}
     },
-    index='loop-app-logs-%s' % iso_date,
+    index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
 
     for hit in hits:
@@ -248,47 +261,127 @@ def furthest_state(events):
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
-def main(iso_date, es_url, es_username, es_password):
-    """Compute a furthest-state histogram for the given date."""
+class JsonBucket(object):
+    """An abstraction for reading and writing a JSON-formatted data structure
+    to a single *existing* S3 key
 
-    def print_wrapped(text):
-        print '\n'.join(wrap(text, term.width))
+    If we start to care about more keys, revise this to at least share
+    a connection.
 
-    term = Terminal()
-    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting', 'receiving', 'sending', 'sendrecv'])
+    """
+    def __init__(self, bucket_name, key):
+        """Auth credentials come from the env vars AWS_ACCESS_KEY_ID and
+        AWS_SECRET_ACCESS_KEY."""
+        s3 = connect_s3()
+        bucket = s3.get_bucket(bucket_name, validate=False)  # We lack the privs to validate, so the bucket had better exist.
+        self._key = Key(bucket=bucket, name=key)
+
+    def read(self):
+        """Return JSON-decoded contents of the S3 key and the version of its
+        format."""
+        # UTF-8 comes out of get_contents_as_string().
+        # We expect the key to have something (like {}) in it in the first
+        # place. I don't trust boto yet to not spuriously return ''.
+        contents = json.loads(self._key.get_contents_as_string())
+        return contents.get('version', 0), contents.get('metrics', [])
+
+    def write(self, data):
+        """Save a JSON-encoded data structure to the S3 key."""
+        # UTF-8 encoded:
+        contents = {'version': VERSION, 'metrics': data}
+        self._key.set_contents_from_string(json.dumps(contents, ensure_ascii=True))
+
+
+def metrics_for_day(day, es):
+    """Compute and return a furthest-state histogram for the given date.
+
+    :arg day: A datetime.date
+    :arg es: An ElasticSearch connection
+
+    """
+    iso_day = day.isoformat()
+    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
+                            'receiving', 'sending', 'sendrecv'])
     weird_counter = StateCounter()
-    es = ElasticSearch(es_url,
-                       username=es_username,
-                       password=es_password,
-                       ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
-                       timeout=600)
 
-    print "Computing furthest-state histogram for %s..." % iso_date
+    print "Computing furthest-state histogram for %s..." % iso_day
 
     # Get the day's records sorted by room token then Timestamp:
-    events = logs_from_day(iso_date, es)  #, size=10000)
+    events = logs_from_day(iso_day, es)  #, size=10000)
     for token, events in groupby(events, lambda l: l.token):
         # For one room token...
         events = list(events)  # prevent suffering
         try:
             if people_meet_in(events):
                 counter.incr(furthest_state(events))
-        except WeirdData as exc:
+        except WeirdData as exc:  # for exploration
             counter.incr('weird')
             weird_counter.incr(exc.__class__)
 
-    print_wrapped("Of rooms in which there were ever 2 people simultaneously, here are the furthest states reached by the link-clicker. (The link-clicker's state is easier to track. \"Further\" states are toward the bottom of the histogram.)")
-    print counter, '\n'
+    # Of rooms in which there were ever 2 people simultaneously, here are the
+    # furthest states reached by the link-clicker. (The link-clicker's state
+    # is easier to track. "Further" states are toward the bottom of the
+    # histogram.)"
+    totals = counter.as_dict()
+    totals['date'] = iso_day
 
     if weird_counter:
-        print_wrapped("A breakdown of the weird data:")
+        print "A breakdown of the weird data:"
         print weird_counter, '\n'
+
+    return totals
+
+
+def days_between(start, end):
+    """Yield each datetime.date in the interval [start, end)."""
+    while start < end:
+        yield start
+        start += timedelta(days=1)  # safe across DST because dates have no concept of hours
+
+
+def main(es_url, es_username, es_password):
+    """Pull the JSON of the historical metrics out of S3, compute the new ones
+    up through yesterday, and write them back to S3.
+
+    We can assume the JSON is small enough to handle because it's already
+    being pulled into the browser in its entirety, along with a dozen other
+    datasets, to display the dashboard.
+
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    es = ElasticSearch(es_url,
+                       username=es_username,
+                       password=es_password,
+                       ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
+                       timeout=600)
+
+    # Get stuff from bucket:
+    bucket = JsonBucket(
+        bucket_name='net-mozaws-prod-metrics-data',
+        key='loop-server-dashboard/loop_full_room_progress.json')
+    version, metrics = bucket.read()
+
+    if not metrics or VERSION > version:  # need to start over
+        start_at = BEGINNING_OF_TIME
+        metrics = []
+    else:
+        # Figure out which days we missed, as of the end of the stored JSON. (This
+        # tolerates unreliable cron jobs, which Heroku warns of, and also guards
+        # against other transient failures.)
+        start_at = datetime.strptime(metrics[-1]['date'], '%Y-%m-%d').date() + timedelta(days=1)
+
+    # Add each of those to the bucket:
+    for day in days_between(start_at, today):
+        metrics.append(metrics_for_day(day, es))
+
+    # Write back to the bucket:
+    bucket.write(metrics)
 
 
 if __name__ == '__main__':
-    date = (argv[1] if len(argv) >= 2
-            else (datetime.now() - timedelta(days=1)).date().isoformat())
-    main(date, environ['ES_URL'], environ['ES_USERNAME'], environ['ES_PASSWORD'])
+    main(environ['ES_URL'], environ['ES_USERNAME'], environ['ES_PASSWORD'])
 
 
 # Observations:
