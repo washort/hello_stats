@@ -116,7 +116,7 @@ def logs_from_day(iso_day, es, size=1000000):
 
     for hit in hits:
         source = hit['_source']
-        action_and_state = (source['action'], source.get('state'))
+        action_and_state = source.get('action'), source.get('state')
         try:
             class_ = EVENT_CLASSES[action_and_state]
         except KeyError:
