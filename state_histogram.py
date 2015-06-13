@@ -289,7 +289,8 @@ class JsonBucket(object):
         """Save a JSON-encoded data structure to the S3 key."""
         # UTF-8 encoded:
         contents = {'version': VERSION, 'metrics': data}
-        self._key.set_contents_from_string(json.dumps(contents, ensure_ascii=True))
+        self._key.set_contents_from_string(
+            json.dumps(contents, ensure_ascii=True, separators=(',', ':')))
 
 
 def metrics_for_day(day, es):
