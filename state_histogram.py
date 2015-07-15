@@ -45,9 +45,10 @@ from pyelasticsearch import ElasticSearch
 # computations.
 VERSION = 1
 
-# The first date for which data for this metric was available in ES. Before
-# this, the userType field is missing.
-BEGINNING_OF_TIME = date(2015, 4, 30)
+# The first date for which data for this metric was available in ES is 4/30.
+# Before this, the userType field is missing. I suspect the data is wrong on
+# 4/30, as the sendrecv rate is ridiculously low, so I'm starting at 5/1.
+BEGINNING_OF_TIME = date(2015, 5, 1)
 
 
 class StateCounter(object):
@@ -403,3 +404,4 @@ if __name__ == '__main__':
 #   of the client.)
 # * These numbers may be a little low because we don't yet notice timeouts
 #   (client crashes, etc.), making the denominator falsely high.
+# TODO: FF >=40 sends actions/states. Make use of those.
