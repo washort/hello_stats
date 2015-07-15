@@ -103,6 +103,7 @@ def logs_from_day(iso_day, es, size=1000000):
                     'and': [
                         {'term': {'path': 'rooms'}},  # Assumption: "rooms" doesn't show up as a token (it's too short).
                         {'term': {'method': 'post'}},  # GETs are not usefully related to state flow.
+                        {'range': {'code': {'gte': 200, 'lt': 300}}},  # no errors
                         {'exists': {'field': 'token'}}  # Assumption: token property is never present when unpopulated.
                     ]
                 }
@@ -121,8 +122,7 @@ def logs_from_day(iso_day, es, size=1000000):
         try:
             class_ = EVENT_CLASSES[action_and_state]
         except KeyError:
-            if action_and_state != ('status', None):  # We know about this one already.
-                print "Unexpected action/state pair: %s" % (action_and_state,)
+            print "Unexpected action/state pair: %s" % (action_and_state,)
             continue
         yield class_(
             token=source['token'],
@@ -396,8 +396,6 @@ if __name__ == '__main__':
 # * There are some sessions in which leaves happen without symmetric joins.
 #   See if these occur near the beginning of days. Otherwise, I would expect
 #   at least Refreshes every 5 minutes.
-# * There are about 60 action=status state=<empty> pairs in each day's logs.
-#   What do those mean, if anything? They're all errors. Filter out bad HTTP status codes.
 # * These numbers may be a little high because we're assuming all
 #   link-clickers are the same link-clicker. When we start logging sessionID,
 #   we can start distinguishing them. (hostname is the IP of the server, not
