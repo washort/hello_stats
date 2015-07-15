@@ -341,7 +341,7 @@ def days_between(start, end):
         start += timedelta(days=1)  # safe across DST because dates have no concept of hours
 
 
-def main(es_url, es_username, es_password):
+def update_s3(es):
     """Pull the JSON of the historical metrics out of S3, compute the new ones
     up through yesterday, and write them back to S3.
 
@@ -352,12 +352,6 @@ def main(es_url, es_username, es_password):
     """
     today = date.today()
     yesterday = today - timedelta(days=1)
-
-    es = ElasticSearch(es_url,
-                       username=es_username,
-                       password=es_password,
-                       ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
-                       timeout=600)
 
     # Get stuff from bucket:
     bucket = JsonBucket(
@@ -382,9 +376,22 @@ def main(es_url, es_username, es_password):
     bucket.write(metrics)
 
 
-if __name__ == '__main__':
-    main(environ['ES_URL'], environ['ES_USERNAME'], environ['ES_PASSWORD'])
+def main():
+    es = ElasticSearch(environ['ES_URL'],
+                       username=environ['ES_USERNAME'],
+                       password=environ['ES_PASSWORD'],
+                       ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
+                       timeout=600)
+    if environ.get('DEV'):
+        # Skip the whole S3 dance, and just print the stats for a recent day:
+        print metrics_for_day(date.today() - timedelta(days=2),
+                              es)
+    else:
+        update_s3(es)
 
+
+if __name__ == '__main__':
+    main()
 
 # Observations:
 #
