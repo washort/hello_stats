@@ -87,6 +87,15 @@ class StateCounter(object):
         return self.total != 0
 
 
+def decode_es_datetime(es_datetime):
+    """Turn an elasticsearch datetime into a datetime object."""
+    try:
+        return datetime.strptime(es_datetime, '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        # For newer ES versions
+        return datetime.strptime(es_datetime, '%Y-%m-%dT%H:%M:%S.%fZ')
+
+
 def logs_from_day(iso_day, es, size=1000000):
     """Return all Events from the given day, in order by room token and then
     timestamp."""
@@ -133,7 +142,7 @@ def logs_from_day(iso_day, es, size=1000000):
         yield class_(
             token=source['token'],
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
-            timestamp=source['Timestamp'])
+            timestamp=decode_es_datetime(source['Timestamp']))
 
 
 class Event(object):
@@ -227,7 +236,7 @@ def people_meet_in(events):
         # Assumption: There is <=1 link-clicker and <=1 built-in client in
         # each room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
-        if isinstance(event, (Join, Refresh)):  # Assumption: Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
+        if isinstance(event, (Join, Refresh)):  # Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
             if event.is_clicker:
                 clicker = True
             else:
@@ -250,7 +259,9 @@ def people_meet_in(events):
         # possibility happens shortly after midnight, when the index rolls
         # over but people are still in rooms.
 
-            # TODO: Think about reporting bad data if a session gets to sendrecv *without* 2 people being in the room. That would be weird (and likely chalked up to timestamp slop).
+        # TODO: Think about reporting bad data if a session gets to sendrecv
+        # *without* 2 people being in the room. That would be weird (and
+        # likely chalked up to timestamp slop).
     return False
 
     # TODO: timeouts
