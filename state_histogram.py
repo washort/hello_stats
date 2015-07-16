@@ -43,7 +43,7 @@ from pyelasticsearch import ElasticSearch
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 3
+VERSION = 4
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
@@ -153,7 +153,7 @@ class Event(object):
     def __init__(self, token, is_clicker, timestamp):
         self.token = token
         self.is_clicker = is_clicker
-        self.timestamp = timestamp  # just for debugging
+        self.timestamp = timestamp
 
     def __str__(self):
         return '<%s %s by %s at %s>' % (
@@ -216,14 +216,23 @@ class WeirdData(Exception):
 
 class Participant(object):
     def __init__(self):
-        self.in_room = False  # whether I am in the room
+        # Whether I am in the room:
+        self.in_room = False
+        # The last time I did any network activity:
+        self.last_action = datetime(2000, 1, 1)
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
+        # TODO: Should we count other events as joins as well?
         if isinstance(event, (Join, Refresh)):  # Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
             self.in_room = True
         elif isinstance(event, Leave):
             self.in_room = False
+        self.last_action = event.timestamp
+
+    def advance_to(self, timestamp):
+        if timestamp - self.last_action >= timedelta(0, 60 * 5):
+            self.in_room = False  # timed out
 
 
 def people_meet_in(events):
@@ -248,8 +257,10 @@ def people_meet_in(events):
         # Assumption: There is <=1 link-clicker and <=1 built-in client in
         # each room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
-        participant = clicker if event.is_clicker else built_in
+        participant, other = ((clicker, built_in) if event.is_clicker
+                              else (built_in, clicker))
         participant.do(event)
+        other.advance_to(event.timestamp)
         if built_in.in_room and clicker.in_room:
             return True
 
@@ -267,8 +278,6 @@ def people_meet_in(events):
         # *without* 2 people being in the room. That would be weird (and
         # likely chalked up to timestamp slop).
     return False
-
-    # TODO: timeouts
 
 
 NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
