@@ -43,7 +43,7 @@ from pyelasticsearch import ElasticSearch
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 2
+VERSION = 3
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
@@ -104,7 +104,13 @@ def logs_from_day(iso_day, es, size=1000000):
                         {'term': {'path': 'rooms'}},  # Assumption: "rooms" doesn't show up as a token (it's too short).
                         {'term': {'method': 'post'}},  # GETs are not usefully related to state flow.
                         {'range': {'code': {'gte': 200, 'lt': 300}}},  # no errors
-                        {'exists': {'field': 'token'}}  # Assumption: token property is never present when unpopulated.
+                        {'exists': {'field': 'token'}},  # Assumption: token property is never present when unpopulated.
+                        # Leave out unsupported iPad browsers, which
+                        # nonetheless end up in our logs and show "join"
+                        # actions. They have "iPad" as user_agent_os and a
+                        # missing user_agent_browser field:
+                        {'not': {'and': [{'term': {'user_agent_os.raw': 'iPad'}},
+                                         {'not': {'exists': {'field': 'user_agent_browser.raw'}}}]}}
                     ]
                 }
             }
@@ -248,7 +254,6 @@ def people_meet_in(events):
     return False
 
     # TODO: timeouts
-    # TODO: Maybe pay attention to GET requests.
 
 
 NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
@@ -409,4 +414,3 @@ if __name__ == '__main__':
 #   of the client.)
 # * These numbers may be a little low because we don't yet notice timeouts
 #   (client crashes, etc.), making the denominator falsely high.
-# TODO: FF >=40 sends actions/states. Make use of those.
