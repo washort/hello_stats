@@ -43,7 +43,7 @@ from pyelasticsearch import ElasticSearch
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 1
+VERSION = 2
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
@@ -109,7 +109,7 @@ def logs_from_day(iso_day, es, size=1000000):
                 }
             }
         },
-        'sort': ['token', 'Timestamp'],
+        'sort': ['token.raw', 'Timestamp'],
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
         '_source': {'include': ['action', 'token', 'userType', 'state', 'Timestamp']}
     },
