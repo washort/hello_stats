@@ -214,6 +214,18 @@ class WeirdData(Exception):
     a bucket."""
 
 
+class Participant(object):
+    def __init__(self):
+        self.in_room = False  # whether I am in the room
+
+    def do(self, event):
+        """Update my state as if I'd just performed an Event."""
+        if isinstance(event, (Join, Refresh)):  # Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
+            self.in_room = True
+        elif isinstance(event, Leave):
+            self.in_room = False
+
+
 def people_meet_in(events):
     """Return whether there were ever 2 people in a room simultaneously.
 
@@ -229,35 +241,27 @@ def people_meet_in(events):
     # should be only 1) is in the room when any link-clicker (of which there
     # might be multiple though theoretically no more than 1 at a time) is.
 
-    built_in = False  # whether there's a built-in client in the room
-    clicker = False  # whether there's a link-clicker in the room
+    built_in = Participant()  # built-in client
+    clicker = Participant()  # link-clicker
 
     for event in events:
         # Assumption: There is <=1 link-clicker and <=1 built-in client in
         # each room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
-        if isinstance(event, (Join, Refresh)):  # Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
-            if event.is_clicker:
-                clicker = True
-            else:
-                built_in = True
+        participant = clicker if event.is_clicker else built_in
+        participant.do(event)
+        if built_in.in_room and clicker.in_room:
+            return True
 
-            if clicker and built_in:
-                return True
-        elif isinstance(event, Leave):
-            if event.is_clicker:
-                clicker = False
-            else:
-                built_in = False
-
-        # clicker + build_in can be unequal to the "participants" field of the
-        # log entry because I'm applying the rule "Only 1 built-in client at a
-        # time in a room", and the app server isn't. For instance, in a series
-        # of logs wherein a built-in joins, refreshes, and then presumably
-        # crashes and joins again (or another copy of the browser joins using
-        # the same FF account), the participant field goes up to 2. Another
-        # possibility happens shortly after midnight, when the index rolls
-        # over but people are still in rooms.
+        # clicker.in_room + built_in.in_room can be unequal to the
+        # "participants" field of the log entry because I'm applying the rule
+        # "Only 1 built-in client at a time in a room", and the app server
+        # isn't. For instance, in a series of logs wherein a built-in joins,
+        # refreshes, and then presumably crashes and joins again (or another
+        # copy of the browser joins using the same FF account), the
+        # participant field goes up to 2. Another possibility happens shortly
+        # after midnight, when the index rolls over but people are still in
+        # rooms.
 
         # TODO: Think about reporting bad data if a session gets to sendrecv
         # *without* 2 people being in the room. That would be weird (and
