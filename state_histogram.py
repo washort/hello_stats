@@ -223,14 +223,18 @@ class Participant(object):
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
-        # TODO: Should we count other events as joins as well?
-        if isinstance(event, (Join, Refresh)):  # Refreshing means you're saying "I'm in the room!" Adding Refresh drops the number of leaves-before-joins from 44 to 35 on a sampling of 10K log entries.
-            self.in_room = True
-        elif isinstance(event, Leave):
+        if isinstance(event, Leave):
             self.in_room = False
+        else:  # Any other kind of event means he's in the room.
+            # Refreshing means you're saying "I'm in the room!" Adding Refresh
+            # drops the number of leaves-before-joins from 44 to 35 on a
+            # sampling of 10K log entries.
+            self.in_room = True
         self.last_action = event.timestamp
 
     def advance_to(self, timestamp):
+        """Note that this participant didn't make any network noise until such
+        and such a time."""
         if timestamp - self.last_action >= timedelta(0, 60 * 5):
             self.in_room = False  # timed out
 
@@ -436,5 +440,7 @@ if __name__ == '__main__':
 #   link-clickers are the same link-clicker. When we start logging sessionID,
 #   we can start distinguishing them. (hostname is the IP of the server, not
 #   of the client.)
-# * These numbers may be a little low because we don't yet notice timeouts
-#   (client crashes, etc.), making the denominator falsely high.
+# We divide events into "session segments", whose endpoint is the event before the one that causes a room to drop from 2 participants to <2. (This lets us treat timeout-triggered ends the same as explicit Leaves. This causes each segment to begin with <2 participants and end with 2.) The next event begins the next session segment. If a room never has 2 people in it, it has no segments.
+# We require network activity every 5 minutes, so any room without activity after 23:55 doesn't need to have anything carried over to the next day. The rest must have their state persisted into the next day. We should stick the portion of the last session segment that falls within the previous day, along with Participant state, into a dict and pull it out on the next day's encounter of the same room to construct a complete session segment. Hide all that behind an iterator (segments_from_days()).
+# Each day's bucket consists of session segments that end (since then we don't have to go back and change any days we've already done) on that day. Instead of counting how many rooms ever had a sendrecv, we count how many sessions ever had one. This seems the most useful daily bucketing in the face of rooms and sessions that may span many days.
+# In order to know the beginning state of the rooms that span midnights when computing just one day (as is typical for the nightly cron job), we can either lay down the data somewhere (private, since room tokens are all you need to join a room) or recompute the whole previous day as well (or some portion of it), hoping to hit a determinable number of participants at some point. In the latter case, sessions that span entire days may throw us off.
