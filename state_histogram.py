@@ -497,7 +497,10 @@ def update_metrics(es, version, metrics, world):
         print "Computing furthest-state histogram for %s..." % iso_day
 
         segments = world.do(events_from_day(iso_day, es))
-        a_days_metrics = counts_for_day(segments).as_dict()
+        counts = counts_for_day(segments)
+        print counts
+        print "%s sessions span midnight (%s%%)." % (len(world._rooms), len(world._rooms) / float(counts.total) * 100)
+        a_days_metrics = counts.as_dict()
         a_days_metrics['date'] = iso_day
         metrics.append(a_days_metrics)
 
