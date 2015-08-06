@@ -7,13 +7,10 @@ Usage::
 
     ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py
 
-Specifically, when join-leave spans overlap in a room, what is the furthest
-state the link-clicker reaches (since we can't tell how far the built-in
-client gets, and sendrecv implies at least one party has bidirectional flow)?
-We draw a histogram of the answer to that question.
-
-Possible later enhancement: for *each* overlapping join-leave pair in a room,
-answer the same question.
+Specifically, for each set of overlapping join-leave spans in a room, what is
+the furthest state the link-clicker reaches (since we can't tell how far the
+built-in client gets, and sendrecv implies at least one party has
+bidirectional flow)? We emit a histogram of the answer to that question.
 
 Idealized state sequences for the 2 different types of clients::
 
@@ -43,12 +40,16 @@ from pyelasticsearch import ElasticSearch
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 4
+VERSION = 5
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
 # 4/30, as the sendrecv rate is ridiculously low, so I'm starting at 5/1.
 BEGINNING_OF_TIME = date(2015, 5, 1)
+
+# Number of seconds without network activity to allow before assuming a room
+# participant is timed out. When this many seconds goes by, they time out.
+TIMEOUT_SECS = 60 * 5
 
 
 class StateCounter(object):
@@ -96,7 +97,7 @@ def decode_es_datetime(es_datetime):
         return datetime.strptime(es_datetime, '%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def logs_from_day(iso_day, es, size=1000000):
+def events_from_day(iso_day, es, size=1000000):
     """Return all Events from the given day, in order by room token and then
     timestamp."""
     # Optimize: Can I do this with aggregations and/or scripts or at least use
@@ -164,6 +165,14 @@ class Event(object):
     def __repr__(self):
         return self.__str__()
 
+    def is_close_to_midnight(self):
+        """Return whether I am so close to midnight that the segment
+        containing me may span into the next day."""
+        midnight = datetime(self.timestamp.year,
+                            self.timestamp.month,
+                            self.timestamp.day) + timedelta(days=1)
+        return self.timestamp + timedelta(seconds=TIMEOUT_SECS) >= midnight
+
 
 class Join(Event):
     state_num = -1
@@ -209,11 +218,6 @@ EVENT_CLASSES = {
 }
 
 
-class WeirdData(Exception):
-    """There was something unexpected about the data that we want to count in
-    a bucket."""
-
-
 class Participant(object):
     def __init__(self):
         # Whether I am in the room:
@@ -235,53 +239,8 @@ class Participant(object):
     def advance_to(self, timestamp):
         """Note that this participant didn't make any network noise until such
         and such a time."""
-        if timestamp - self.last_action >= timedelta(0, 60 * 5):
+        if timestamp - self.last_action >= timedelta(0, TIMEOUT_SECS):
             self.in_room = False  # timed out
-
-
-def people_meet_in(events):
-    """Return whether there were ever 2 people in a room simultaneously.
-
-    In other words, do any link-clicker join/leave spans overlap with built-in
-    ones?
-
-    :arg events: All the logged Events from the room, in time order
-
-    """
-    # Play back join/leave activity, assuming each event happens at a unique
-    # time (which should be close enough to true, since we log to the
-    # thousandth of a sec) and seeing if any built-in client (of which there
-    # should be only 1) is in the room when any link-clicker (of which there
-    # might be multiple though theoretically no more than 1 at a time) is.
-
-    built_in = Participant()  # built-in client
-    clicker = Participant()  # link-clicker
-
-    for event in events:
-        # Assumption: There is <=1 link-clicker and <=1 built-in client in
-        # each room. This is not actually strictly true: it is possible for 2
-        # browsers to join if they're signed into the same FF Account.
-        participant, other = ((clicker, built_in) if event.is_clicker
-                              else (built_in, clicker))
-        participant.do(event)
-        other.advance_to(event.timestamp)
-        if built_in.in_room and clicker.in_room:
-            return True
-
-        # clicker.in_room + built_in.in_room can be unequal to the
-        # "participants" field of the log entry because I'm applying the rule
-        # "Only 1 built-in client at a time in a room", and the app server
-        # isn't. For instance, in a series of logs wherein a built-in joins,
-        # refreshes, and then presumably crashes and joins again (or another
-        # copy of the browser joins using the same FF account), the
-        # participant field goes up to 2. Another possibility happens shortly
-        # after midnight, when the index rolls over but people are still in
-        # rooms.
-
-        # TODO: Think about reporting bad data if a session gets to sendrecv
-        # *without* 2 people being in the room. That would be weird (and
-        # likely chalked up to timestamp slop).
-    return False
 
 
 NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
@@ -295,7 +254,7 @@ def furthest_state(events):
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
-class JsonBucket(object):
+class VersionedJsonBucket(object):
     """An abstraction for reading and writing a JSON-formatted data structure
     to a single *existing* S3 key
 
@@ -327,46 +286,6 @@ class JsonBucket(object):
             json.dumps(contents, ensure_ascii=True, separators=(',', ':')))
 
 
-def metrics_for_day(day, es):
-    """Compute and return a furthest-state histogram for the given date.
-
-    :arg day: A datetime.date
-    :arg es: An ElasticSearch connection
-
-    """
-    iso_day = day.isoformat()
-    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
-                            'receiving', 'sending', 'sendrecv'])
-    weird_counter = StateCounter()
-
-    print "Computing furthest-state histogram for %s..." % iso_day
-
-    # Get the day's records sorted by room token then Timestamp:
-    events = logs_from_day(iso_day, es)  #, size=10000)
-    for token, events in groupby(events, lambda l: l.token):
-        # For one room token...
-        events = list(events)  # prevent suffering
-        try:
-            if people_meet_in(events):
-                counter.incr(furthest_state(events))
-        except WeirdData as exc:  # for exploration
-            counter.incr('weird')
-            weird_counter.incr(exc.__class__)
-
-    # Of rooms in which there were ever 2 people simultaneously, here are the
-    # furthest states reached by the link-clicker. (The link-clicker's state
-    # is easier to track. "Further" states are toward the bottom of the
-    # histogram.)"
-    totals = counter.as_dict()
-    totals['date'] = iso_day
-
-    if weird_counter:
-        print "A breakdown of the weird data:"
-        print weird_counter, '\n'
-
-    return totals
-
-
 def days_between(start, end):
     """Yield each datetime.date in the interval [start, end)."""
     while start < end:
@@ -374,7 +293,218 @@ def days_between(start, end):
         start += timedelta(days=1)  # safe across DST because dates have no concept of hours
 
 
-def update_s3(es):
+class Room(object):
+    """State machine tracking the progress of conversations in a chat room
+
+    Play back join/leave activity, assuming each event happens at a unique
+    time (which should be close enough to true, since we log to the thousandth
+    of a sec) and seeing if any built-in client (of which there should be only
+    1) is in the room when any link-clicker (of which there might be multiple
+    though theoretically no more than 1 at a time) is.
+
+    """
+    def __init__(self):
+        self._clear()
+
+    def _clear(self):
+        self.clicker = Participant()
+        self.built_in = Participant()
+        self.segment = []
+        self.in_session = False  # whether there are 2 people in the room
+
+    def do(self, event):
+        """Update my state as if ``event`` has happened, returning a segment
+        if one has just finished."""
+        self.segment.append(event)
+
+        # Assumption: There is <=1 link-clicker and <=1 built-in client in
+        # each room. This is not actually strictly true: it is possible for 2
+        # browsers to join if they're signed into the same FF Account.
+        doer, other = ((self.clicker, self.built_in) if event.is_clicker
+                       else (self.built_in, self.clicker))
+        doer.do(event)
+        other.advance_to(event.timestamp)
+
+        if not self.in_session:
+            # Maybe a session begins:
+            if self.clicker.in_room and self.built_in.in_room:
+                self.in_session = True
+
+            # clicker.in_room + built_in.in_room can be unequal to the
+            # "participants" field of the log entry because I'm applying the
+            # rule "Only 1 built-in client at a time in a room", and the app
+            # server isn't. For instance, in a series of logs wherein a
+            # built-in joins, refreshes, and then presumably crashes and joins
+            # again (or another copy of the browser joins using the same FF
+            # account), the participant field goes up to 2.
+
+            # TODO: Think about reporting bad data if a session gets to
+            # sendrecv *without* 2 people being in the room. That would be
+            # weird (and likely chalked up to timestamp slop).
+        else:
+            # Maybe a session ends:
+            if not (self.clicker.in_room and self.built_in.in_room):
+                self.in_session = False
+                ret = self.segment
+                self.segment = [ret.pop()]  # Don't return session-ending event; keep it to start the next segment.
+                return ret
+
+    def final_segment(self):
+        """Inform the Room that no more events are coming, at least none
+        before the room completely resets due to timeouts for all users. If
+        this knowledge of an upcoming drop in the number of participants
+        causes a segment to complete, return it. Otherwise, return None.
+
+        """
+        ret = self.segment if self.in_session else None
+        self._clear()
+        return ret
+
+
+class World(object):
+    """Serializable state of all potentially in-progress sessions at a point
+    in time
+
+    We divide events into "session segments", whose endpoint is the event
+    before the one that causes a room to drop from 2 participants to <2. (This
+    lets us treat timeout-triggered ends the same as explicit Leaves. This
+    causes each segment to begin with <2 participants and end with 2.) The
+    next event begins the next session segment. If a room never has 2 people
+    in it, it has no segments.
+
+    We require network activity every 5 minutes, so any room without activity
+    after 23:55 doesn't need to have anything carried over to the next day.
+    The rest must have their state persisted into the next day. We stick the
+    portion of the last session segment that falls within the previous day,
+    along with Participant state, into a dict and pull it out on the next
+    day's encounter of the same room to construct a complete session segment.
+
+    Each day's bucket consists of session segments that end (since then we
+    don't have to go back and change any days we've already done) on that day.
+    Instead of counting how many rooms ever had a sendrecv, we count how many
+    sessions ever had one. This seems the most useful daily bucketing in the
+    face of rooms and sessions that may span many days.
+
+    In order to know the beginning state of the rooms that span midnights when
+    computing just one day (as is typical for the nightly cron job), we could
+    either lay down the data somewhere (private, since room tokens are all you
+    need to join a room) or recompute the whole previous day as well (or some
+    portion of it), hoping to hit a determinable number of participants at
+    some point. In the latter case, sessions that span entire days may throw
+    us off. We do the former, for greatest accuracy.
+
+    """
+    def __init__(self):
+        self._rooms = {}  # {token: Room} for each room with a partial segment that ended suspiciously close to midnight at the end of the last day for which segments() was called
+
+    def _non_spanning_segments(self, a_days_events, todays_rooms):
+        """Yield segments that end on a given day and don't end close enough
+        to a midnight to threaten to span into the next day.
+
+        Squirrel any trailing partial segments away for later resumption.
+
+        :arg todays_rooms: Set to which we add the room tokens we saw. This
+            lets a caller pick out rooms whose last segment ended yesterday
+            suspiciously close to midnight but then had no continuation today
+
+        """
+        for token, a_rooms_events in groupby(a_days_events, lambda e: e.token):  # for each room
+            todays_rooms.add(token)
+            room = self._rooms.pop(token, Room())  # grab saved state, if any
+            for event in a_rooms_events:
+                segment = room.do(event)  # update Participants, return a segment if it just finished (and clear internal segment buffer), None otherwise
+                if segment:
+                    yield segment  # Let the caller count the total segs and see how many made it to sendrecv.
+            if not segment:  # We didn't happen to end on a segment boundary.
+                if event.is_close_to_midnight():
+                    self._rooms[token] = room  # save the partially done segment for tomorrow
+                else:
+                    final_segment = room.final_segment()
+                    if final_segment:
+                        yield final_segment  # return whatever's in there, and clear it
+
+    def do(self, a_days_events):
+        """Update the world's state to take into account a day's events, and
+        yield the segments wholly contained by that day, as well as any
+        spilling over midnight from the previous day.
+
+        Yield segments. This is a segment::
+
+            [event 1, event 2, event 3, ...]
+
+        Segments are not necessarily returned in order.
+
+        """
+        yesterdays_rooms = set(self._rooms.iterkeys())
+        todays_rooms = set()
+        for segment in self._non_spanning_segments(a_days_events, todays_rooms):
+            yield segment
+
+        # Emit any last segment from each room whose final segment ran up
+        # suspiciously close to midnight last night but then had no
+        # continuation on the other side. (If it had a continuation, all
+        # appropriate segments would have been already yielded by
+        # _non_spanning_segments().)
+        for token in yesterdays_rooms - todays_rooms:  # If a room had events again today and is spanning the next midnight, don't emit its leftovers.
+            room = self._rooms.pop(token)
+            final_segment = room.final_segment()
+            if final_segment:
+                yield final_segment  # return whatever's in there, and clear it
+
+
+def counts_for_day(segments):
+    """Return a StateCounter conveying a histogram of the segments' furthest
+    states."""
+    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
+                            'receiving', 'sending', 'sendrecv'])
+    for segment in segments:
+        # In each segment, here are the furthest states reached by the
+        # link-clicker. (The link-clicker's state is easier to track.)
+        furthest = furthest_state(segment)
+        counter.incr(furthest)
+    # Of rooms in which there were ever 2 people simultaneously, here are the
+    # furthest states reached by the link-clicker. (The link-clicker's state
+    # is easier to track. "Further" states are toward the bottom of the
+    # histogram.)"
+    return counter
+
+
+def update_metrics(es, version, metrics, world):
+    """Update metrics with today's (and previous missed days') data.
+
+    Also update the state of the ``world`` with sessions that may hang over
+    into tomorrow.
+
+    If VERSION has increased, start over.
+
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    if not metrics or VERSION > version:  # need to start over
+        start_at = BEGINNING_OF_TIME
+        metrics = []
+        world = World()
+    else:
+        # Figure out which days we missed, as of the end of the stored JSON.
+        # (This tolerates unreliable cron jobs, which Heroku warns of, and
+        # also guards against other transient failures.)
+        start_at = datetime.strptime(metrics[-1]['date'], '%Y-%m-%d').date() + timedelta(days=1)
+
+    # Add each of those to the bucket:
+    for day in days_between(start_at, today):
+        iso_day = day.isoformat()
+        print "Computing furthest-state histogram for %s..." % iso_day
+
+        segments = world.do(events_from_day(iso_day, es))
+        a_days_metrics = counts_for_day(segments).as_dict()
+        a_days_metrics['date'] = iso_day
+        metrics.append(a_days_metrics)
+
+    return metrics, world
+
+
+def main():
     """Pull the JSON of the historical metrics out of S3, compute the new ones
     up through yesterday, and write them back to S3.
 
@@ -383,48 +513,28 @@ def update_s3(es):
     datasets, to display the dashboard.
 
     """
-    today = date.today()
-    yesterday = today - timedelta(days=1)
-
-    # Get stuff from bucket:
-    bucket = JsonBucket(
-        bucket_name='net-mozaws-prod-metrics-data',
-        key='loop-server-dashboard/loop_full_room_progress.json')
-    version, metrics = bucket.read()
-
-    if not metrics or VERSION > version:  # need to start over
-        start_at = BEGINNING_OF_TIME
-        metrics = []
-    else:
-        # Figure out which days we missed, as of the end of the stored JSON. (This
-        # tolerates unreliable cron jobs, which Heroku warns of, and also guards
-        # against other transient failures.)
-        start_at = datetime.strptime(metrics[-1]['date'], '%Y-%m-%d').date() + timedelta(days=1)
-
-    # Add each of those to the bucket:
-    for day in days_between(start_at, today):
-        metrics.append(metrics_for_day(day, es))
-
-    # Write back to the bucket:
-    bucket.write(metrics)
-
-
-def main():
     es = ElasticSearch(environ['ES_URL'],
                        username=environ['ES_USERNAME'],
                        password=environ['ES_PASSWORD'],
                        ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
-    if environ.get('DEV'):
-        # Skip the whole S3 dance, and just print the stats for a recent day:
-        print metrics_for_day(date.today() - timedelta(days=2),
-                              es)
-    else:
-        update_s3(es)
+    # Get previous metrics and midnight-spanning room state from buckets:
+    bucket = VersionedJsonBucket(
+        bucket_name='net-mozaws-prod-metrics-data',
+        key='loop-server-dashboard/loop_full_room_progress.json')
+    version, metrics = bucket.read()
+    world = unpickle_world()
+
+    metrics, world = update_metrics(es, version, metrics, world)
+
+    # Write back to the buckets:
+    pickle_world(world)
+    bucket.write(metrics)
 
 
 if __name__ == '__main__':
     main()
+
 
 # Observations:
 #
@@ -440,7 +550,6 @@ if __name__ == '__main__':
 #   link-clickers are the same link-clicker. When we start logging sessionID,
 #   we can start distinguishing them. (hostname is the IP of the server, not
 #   of the client.)
-# We divide events into "session segments", whose endpoint is the event before the one that causes a room to drop from 2 participants to <2. (This lets us treat timeout-triggered ends the same as explicit Leaves. This causes each segment to begin with <2 participants and end with 2.) The next event begins the next session segment. If a room never has 2 people in it, it has no segments.
-# We require network activity every 5 minutes, so any room without activity after 23:55 doesn't need to have anything carried over to the next day. The rest must have their state persisted into the next day. We should stick the portion of the last session segment that falls within the previous day, along with Participant state, into a dict and pull it out on the next day's encounter of the same room to construct a complete session segment. Hide all that behind an iterator (segments_from_days()).
-# Each day's bucket consists of session segments that end (since then we don't have to go back and change any days we've already done) on that day. Instead of counting how many rooms ever had a sendrecv, we count how many sessions ever had one. This seems the most useful daily bucketing in the face of rooms and sessions that may span many days.
-# In order to know the beginning state of the rooms that span midnights when computing just one day (as is typical for the nightly cron job), we can either lay down the data somewhere (private, since room tokens are all you need to join a room) or recompute the whole previous day as well (or some portion of it), hoping to hit a determinable number of participants at some point. In the latter case, sessions that span entire days may throw us off.
+# * We could be nice and not expect a sendrecv to happen if the co-presence of
+#   2 people lasts only a few seconds. Maybe we could chart the length of failed
+#   sessions and figure out where n sigmas is.
