@@ -346,6 +346,7 @@ class Room(object):
             # Maybe a session begins:
             if self.clicker.in_room and self.built_in.in_room:
                 self.in_session = True
+                self start time
 
             # clicker.in_room + built_in.in_room can be unequal to the
             # "participants" field of the log entry because I'm applying the
@@ -362,6 +363,7 @@ class Room(object):
             # Maybe a session ends:
             if not (self.clicker.in_room and self.built_in.in_room):
                 self.in_session = False
+                self end time
                 ret = self.segment
                 self.segment = [ret.pop()]  # Don't return session-ending event; keep it to start the next segment.
                 return ret
@@ -373,7 +375,11 @@ class Room(object):
         causes a segment to complete, return it. Otherwise, return None.
 
         """
-        ret = self.segment if self.in_session else None
+        if self.in_session:
+            self end time
+            ret = self.segment
+        else:
+            ret = None
         self._clear()
         return ret
 
