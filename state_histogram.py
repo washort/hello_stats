@@ -31,8 +31,9 @@ from itertools import groupby
 import json
 from os import environ
 from os.path import dirname, join
+import cPickle as pickle
 
-from boto import connect_s3
+from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 from pyelasticsearch import ElasticSearch
 
@@ -254,7 +255,23 @@ def furthest_state(events):
     return NUM_TO_STATE[max(e.state_num for e in events)]
 
 
-class VersionedJsonBucket(object):
+class Bucket(object):
+    """An abstraction to reading and writing to a single key in an S3 bucket"""
+
+    def __init__(self, bucket_name, key, access_key_id, secret_access_key):
+        s3 = S3Connection(aws_access_key_id=access_key_id,
+                          aws_secret_access_key=secret_access_key)
+        bucket = s3.get_bucket(bucket_name, validate=False)  # We lack the privs to validate, so the bucket had better exist.
+        self._key = Key(bucket=bucket, name=key)
+
+    def read(self):
+        return self._read(self._key.get_contents_as_string())
+
+    def write(self, data):
+        self._key.set_contents_from_string(self._write(data))
+
+
+class VersionedJsonBucket(Bucket):
     """An abstraction for reading and writing a JSON-formatted data structure
     to a single *existing* S3 key
 
@@ -262,28 +279,28 @@ class VersionedJsonBucket(object):
     a connection.
 
     """
-    def __init__(self, bucket_name, key):
-        """Auth credentials come from the env vars AWS_ACCESS_KEY_ID and
-        AWS_SECRET_ACCESS_KEY."""
-        s3 = connect_s3()
-        bucket = s3.get_bucket(bucket_name, validate=False)  # We lack the privs to validate, so the bucket had better exist.
-        self._key = Key(bucket=bucket, name=key)
-
-    def read(self):
+    def _read(self, contents):
         """Return JSON-decoded contents of the S3 key and the version of its
         format."""
         # UTF-8 comes out of get_contents_as_string().
         # We expect the key to have something (like {}) in it in the first
         # place. I don't trust boto yet to not spuriously return ''.
-        contents = json.loads(self._key.get_contents_as_string())
+        contents = json.loads(contents)
         return contents.get('version', 0), contents.get('metrics', [])
 
-    def write(self, data):
+    def _write(self, data):
         """Save a JSON-encoded data structure to the S3 key."""
         # UTF-8 encoded:
         contents = {'version': VERSION, 'metrics': data}
-        self._key.set_contents_from_string(
-            json.dumps(contents, ensure_ascii=True, separators=(',', ':')))
+        return json.dumps(contents, ensure_ascii=True, separators=(',', ':'))
+
+
+class PickleBucket(Bucket):
+    def _read(self, contents):
+        return pickle.loads(contents)
+
+    def _write(self, data):
+        return pickle.dumps(data)
 
 
 def days_between(start, end):
@@ -475,7 +492,7 @@ def update_metrics(es, version, metrics, world):
     Also update the state of the ``world`` with sessions that may hang over
     into tomorrow.
 
-    If VERSION has increased, start over.
+    If VERSION has increased or ``metrics`` is empty, start over.
 
     """
     today = date.today()
@@ -522,17 +539,24 @@ def main():
                        ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
     # Get previous metrics and midnight-spanning room state from buckets:
-    bucket = VersionedJsonBucket(
+    metrics_bucket = VersionedJsonBucket(
         bucket_name='net-mozaws-prod-metrics-data',
-        key='loop-server-dashboard/loop_full_room_progress.json')
-    version, metrics = bucket.read()
-    world = unpickle_world()
+        key='loop-server-dashboard/loop_full_room_progress.json',
+        access_key_id=environ['METRICS_ACCESS_KEY_ID'],
+        secret_access_key=environ['METRICS_SECRET_ACCESS_KEY'])
+    version, metrics = metrics_bucket.read()
+    world_bucket = PickleBucket(
+        bucket_name='mozilla-loop-metrics-state',
+        key='session-progress.pickle',
+        access_key_id=environ['STATE_ACCESS_KEY_ID'],
+        secret_access_key=environ['STATE_SECRET_ACCESS_KEY'])
+    world = world_bucket.read()
 
     metrics, world = update_metrics(es, version, metrics, world)
 
     # Write back to the buckets:
-    pickle_world(world)
-    bucket.write(metrics)
+    world_bucket.write(world)
+    metrics_bucket.write(metrics)
 
 
 if __name__ == '__main__':
