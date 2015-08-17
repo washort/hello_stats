@@ -90,3 +90,8 @@ class WorldTests(TestCase):
 
         # Run Day B.
         eq_(list(w.do([e7, e8, e9, e10])), [[e4, e5, e6], [e7, e8, e9]])  # e10 is thrown away, as it's the one that causes participants to drop below 2, and then there are no more events to form a segment.
+
+
+# Test:
+# whether a segment ends with the event that drops ppl to <2
+# whether Timeout events get appended via both do() and final_segment()
