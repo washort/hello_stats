@@ -171,10 +171,14 @@ class Event(object):
     def is_close_to_midnight(self):
         """Return whether I am so close to midnight that the segment
         containing me may span into the next day."""
-        midnight = datetime(self.timestamp.year,
-                            self.timestamp.month,
-                            self.timestamp.day) + timedelta(days=1)
-        return self.timestamp + timedelta(seconds=TIMEOUT_SECS) >= midnight
+        return self.timestamp + timedelta(seconds=TIMEOUT_SECS) >= self.next_midnight()
+
+    def next_midnight(self):
+        """Return the next midnight after me."""
+        return datetime(self.timestamp.year,
+                        self.timestamp.month,
+                        self.timestamp.day) + timedelta(days=1)
+
 
 
 class Join(Event):
@@ -463,13 +467,10 @@ class World(object):
                 if segment:
                     yield segment  # Let the caller count the total segs and see how many made it to sendrecv.
             if not segment:  # We didn't happen to end on a segment boundary.
-                midnight = datetime(event.timestamp.year,
-                                    event.timestamp.month,
-                                    event.timestamp.day) + timedelta(days=1)
-                if event.timestamp + timedelta(seconds=TIMEOUT_SECS) >= midnight:  # close to midnight
+                if event.is_close_to_midnight():
                     self._rooms[token] = room  # save the partially done segment for tomorrow
                 else:
-                    final_segment = room.final_segment(midnight)
+                    final_segment = room.final_segment(event.next_midnight())
                     if final_segment:
                         yield final_segment  # return whatever's in there, and clear it
 
