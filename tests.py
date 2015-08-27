@@ -43,7 +43,7 @@ class RoomTests(TestCase):
         eq_(r.do(e5), None)
         # Time them both out:
         built_in_timeout2 = Timeout('a', BUILT_IN, datetime(2015, 1, 1, 1, 11, 0))
-        eq_(r.final_segment(datetime(2015, 1, 1, 2, 0, 0)),
+        eq_(r.final_segment(),
             [built_in_timeout1, e4, e5, built_in_timeout2])
 
     def test_timeouts_with_final_segment(self):
@@ -60,7 +60,7 @@ class RoomTests(TestCase):
         eq_(r.do(e2), None)  # still not 2 participants, so no seg yet
         eq_(r.do(e3), None)  # nothing yet; at 2 and waiting to drop below
         timeout2 = Timeout('a', CLICKER, datetime(2015, 1, 1, 0, 10, 1))
-        eq_(r.final_segment(datetime(2015, 1, 1, 2, 0, 0)), [e1, timeout1, e2, e3, timeout2])
+        eq_(r.final_segment(), [e1, timeout1, e2, e3, timeout2])
 
     def test_timeout_without_final_segment(self):
         """Make sure that, if the room never gets to 2 concurrent
@@ -70,7 +70,7 @@ class RoomTests(TestCase):
         e2 = Join('a', CLICKER, datetime(2015, 1, 1, 0, 5, 1))
         eq_(r.do(e1), None)
         eq_(r.do(e2), None)  # still not 2 participants, so no seg yet
-        eq_(r.final_segment(datetime(2015, 1, 1, 1, 0, 0)), None)
+        eq_(r.final_segment(), None)
 
 
 class WorldTests(TestCase):

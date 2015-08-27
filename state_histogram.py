@@ -428,20 +428,20 @@ class Room(object):
             # sendrecv *without* 2 people being in the room. That would be
             # weird (and likely chalked up to timestamp slop).
 
-    def final_segment(self, timestamp):
-        """Inform the Room that no more events are coming until at least
-        ``timestamp``, which is far enough away from the last event to trigger
-        a timeout. If this knowledge of an upcoming drop in the number of
-        participants causes a segment to complete, return it. Otherwise,
-        return None.
+    def final_segment(self):
+        """Inform the Room that no more events are coming until far enough
+        away from the last one to trigger a timeout. If this knowledge of an
+        upcoming drop in the number of participants causes a segment to
+        complete, return it. Otherwise, return None.
 
         """
+        FAR_FUTURE = datetime(3000, 1, 1, 0, 0, 0)
         if self.in_session:
             # Get soonest Timeout event, and append it to the segment:
             longest_since_spoke = min(
                 [self.clicker, self.built_in],
-                key=lambda x: getattr(x.last_event, 'timestamp', date(3000, 1, 1)))
-            timeout = longest_since_spoke.advance_to(timestamp)
+                key=lambda x: getattr(x.last_event, 'timestamp', FAR_FUTURE))
+            timeout = longest_since_spoke.advance_to(FAR_FUTURE)
             assert timeout
             self.segment.append(timeout)
             ret = self.segment
@@ -514,7 +514,7 @@ class World(object):
                 if event.is_close_to_midnight():
                     self._rooms[token] = room  # save the partially done segment for tomorrow
                 else:
-                    final_segment = room.final_segment(event.next_midnight())
+                    final_segment = room.final_segment()
                     if final_segment:
                         yield final_segment  # return whatever's in there, and clear it
 
