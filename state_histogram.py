@@ -133,7 +133,6 @@ def events_from_day(iso_day, es, size=1000000):
     },
     index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
-    #from hits import saved_hits as hits
 
     for hit in hits:
         source = hit['_source']
@@ -593,8 +592,6 @@ def success_duration_histogram(segments):
                 if start is None:
                     yield 0  # Weirdness. Timestamp slop?
                 else:
-#                     if (event.timestamp - start).seconds > 20:
-#                         import pdb;pdb.set_trace()
                     yield (event.timestamp - start).seconds
                 break
 
@@ -660,9 +657,6 @@ def update_metrics(es, version, metrics, world):
         a_days_metrics['date'] = iso_day
         metrics.append(a_days_metrics)
 
-        #print success_duration_histogram(successes(segments))
-        print failure_duration_histogram(failures(segments))
-
     return metrics, world
 
 
@@ -680,20 +674,6 @@ def main():
                        password=environ['ES_PASSWORD'],
                        ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
-
-#     world_bucket = PickleBucket(
-#         bucket_name='mozilla-loop-metrics-state',
-#         key='session-progress.pickle',
-#         access_key_id=environ['STATE_ACCESS_KEY_ID'],
-#         secret_access_key=environ['STATE_SECRET_ACCESS_KEY'])
-#     world = world_bucket.read()
-    world = pickle.loads(open('state_from_8-12-2015.pickle').read())
-    segments = world.do(events_from_day((date.today()).isoformat(), es))
-
-    for duration in failure_duration_histogram(failures(segments)):
-        print duration
-    return
-
 
     # Get previous metrics and midnight-spanning room state from buckets:
     metrics_bucket = VersionedJsonBucket(
