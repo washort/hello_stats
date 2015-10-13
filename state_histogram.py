@@ -51,6 +51,7 @@ BEGINNING_OF_TIME = date(2015, 6, 12)
 # Number of seconds without network activity to allow before assuming a room
 # participant is timed out. When this many seconds goes by, they time out.
 TIMEOUT_SECS = 60 * 5
+TIMEOUT_DURATION = timedelta(0, TIMEOUT_SECS)
 
 
 class StateCounter(object):
@@ -169,10 +170,16 @@ class Event(object):
     def is_close_to_midnight(self):
         """Return whether I am so close to midnight that the segment
         containing me may span into the next day."""
-        midnight = datetime(self.timestamp.year,
-                            self.timestamp.month,
-                            self.timestamp.day) + timedelta(days=1)
-        return self.timestamp + timedelta(seconds=TIMEOUT_SECS) >= midnight
+        return self.timestamp + timedelta(seconds=TIMEOUT_SECS) >= self.next_midnight()
+
+    def next_midnight(self):
+        """Return the next midnight after me."""
+        return datetime(self.timestamp.year,
+                        self.timestamp.month,
+                        self.timestamp.day) + timedelta(days=1)
+
+    def __eq__(self, other):
+        return self.__dict__ == other.__dict__
 
 
 class Join(Event):
@@ -207,6 +214,11 @@ class Refresh(Event):
     state_num = -3
 
 
+class Timeout(Event):
+    """A virtual event we materialize to represent a user timing out"""
+    state_num = -100
+
+
 EVENT_CLASSES = {
     ('join', None): Join,
     ('leave', None): Leave,
@@ -223,25 +235,37 @@ class Participant(object):
     def __init__(self):
         # Whether I am in the room:
         self.in_room = False
-        # The last time I did any network activity:
-        self.last_action = datetime(2000, 1, 1)
+        # The last network activity I did. If I've done none since I last
+        # exited the room, None:
+        self.last_event = None
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
         if isinstance(event, Leave):
             self.in_room = False
+            self.last_event = None
         else:  # Any other kind of event means he's in the room.
             # Refreshing means you're saying "I'm in the room!" Adding Refresh
             # drops the number of leaves-before-joins from 44 to 35 on a
             # sampling of 10K log entries.
             self.in_room = True
-        self.last_action = event.timestamp
+            self.last_event = event
 
     def advance_to(self, timestamp):
         """Note that this participant didn't make any network noise until such
-        and such a time."""
-        if timestamp - self.last_action >= timedelta(0, TIMEOUT_SECS):
+        and such a time.
+
+        If this causes him to timeout, return a Timeout.
+
+        """
+        last = self.last_event
+        if last and timestamp - last.timestamp >= TIMEOUT_DURATION:
             self.in_room = False  # timed out
+            self.last_event = None
+            return Timeout(last.token,
+                           last.is_clicker,
+                           last.timestamp + TIMEOUT_DURATION)
+
 
 
 NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
@@ -332,17 +356,61 @@ class Room(object):
     def do(self, event):
         """Update my state as if ``event`` has happened, returning a segment
         if one has just finished."""
-        self.segment.append(event)
+
+        def ordered_timeouts(doer_timeout, other_timeout):
+            """Return the timeouts that happened, in chronological order."""
+            timeouts = []
+            if doer_timeout:
+                timeouts.append(doer_timeout)
+            if other_timeout:
+                timeouts.append(other_timeout)
+            timeouts.sort(key=lambda e: e.timestamp)
+            return timeouts
 
         # Assumption: There is <=1 link-clicker and <=1 built-in client in
         # each room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
         doer, other = ((self.clicker, self.built_in) if event.is_clicker
                        else (self.built_in, self.clicker))
-        doer.do(event)
-        other.advance_to(event.timestamp)
 
-        if not self.in_session:
+        # Timeouts will intrinsically be timestamped before the event:
+        other_timeout = other.advance_to(event.timestamp)
+        doer_timeout = doer.advance_to(event.timestamp)  # Detect doer crashes.
+        doer.do(event)
+
+        if self.in_session:
+            # Maybe a session ends:
+            if not (self.clicker.in_room and self.built_in.in_room):
+                self.in_session = False
+                timeouts = ordered_timeouts(doer_timeout, other_timeout)
+                if timeouts:
+                    # The first of the one or more timeouts ended the segment.
+                    # (Both timeouts will intrinsically have a timestamp
+                    # before the doer's current event.)
+                    self.segment.append(timeouts.pop(0))
+                    # Start the next segment with the event after the ending
+                    # timeout, whether it's another timeout or the event
+                    # itself:
+                    next_segment = timeouts + [event]
+                else:
+                    # It wasn't a timeout that ended the session; it must have
+                    # been the event, so include it:
+                    self.segment.append(event)
+                    next_segment = []
+
+                ret, self.segment = self.segment, next_segment
+                return ret
+            else:  # still in session, so nobody timed out
+                self.segment.append(event)
+        else:
+            # Add timeouts to segment. We aren't in a session, so we can add
+            # timeouts without worrying about whether they should end the
+            # segment.
+            timeouts = ordered_timeouts(doer_timeout, other_timeout)
+            self.segment.extend(timeouts)
+
+            self.segment.append(event)
+
             # Maybe a session begins:
             if self.clicker.in_room and self.built_in.in_room:
                 self.in_session = True
@@ -358,22 +426,26 @@ class Room(object):
             # TODO: Think about reporting bad data if a session gets to
             # sendrecv *without* 2 people being in the room. That would be
             # weird (and likely chalked up to timestamp slop).
-        else:
-            # Maybe a session ends:
-            if not (self.clicker.in_room and self.built_in.in_room):
-                self.in_session = False
-                ret = self.segment
-                self.segment = [ret.pop()]  # Don't return session-ending event; keep it to start the next segment.
-                return ret
 
     def final_segment(self):
-        """Inform the Room that no more events are coming, at least none
-        before the room completely resets due to timeouts for all users. If
-        this knowledge of an upcoming drop in the number of participants
-        causes a segment to complete, return it. Otherwise, return None.
+        """Inform the Room that no more events are coming until far enough
+        away from the last one to trigger a timeout. If this knowledge of an
+        upcoming drop in the number of participants causes a segment to
+        complete, return it. Otherwise, return None.
 
         """
-        ret = self.segment if self.in_session else None
+        FAR_FUTURE = datetime(3000, 1, 1, 0, 0, 0)
+        if self.in_session:
+            # Get soonest Timeout event, and append it to the segment:
+            longest_since_spoke = min(
+                [self.clicker, self.built_in],
+                key=lambda x: getattr(x.last_event, 'timestamp', FAR_FUTURE))
+            timeout = longest_since_spoke.advance_to(FAR_FUTURE)
+            assert timeout
+            self.segment.append(timeout)
+            ret = self.segment
+        else:
+            ret = None
         self._clear()
         return ret
 
@@ -382,12 +454,17 @@ class World(object):
     """Serializable state of all potentially in-progress sessions at a point
     in time
 
-    We divide events into "session segments", whose endpoint is the event
-    before the one that causes a room to drop from 2 participants to <2. (This
-    lets us treat timeout-triggered ends the same as explicit Leaves. This
-    causes each segment to begin with <2 participants and end with 2.) The
-    next event begins the next session segment. If a room never has 2 people
-    in it, it has no segments.
+    We group events into "session segments", which are periods during which 2
+    people attempt to join a room, though they may or may not succeed in
+    negotiating bidirectional communication (a "session"). Session segments
+    start with 0, 1, or 2 participants, always reach 2 at some point, and then
+    descend to < 2. A session segment's last event is the one that causes its
+    room to drop from 2 participants to < 2. If the "event" that causes this
+    is a timeout, we materialize a virtual Timeout and stick it on the end of
+    the segment so we can easily count which segments timed out. Thus, each
+    segment ends with < 2 participants, and the first event of the next
+    segment may raise it back to 2 again. If a room never has 2 people in it
+    at once, it has no segments.
 
     We require network activity every 5 minutes, so any room without activity
     after 23:55 doesn't need to have anything carried over to the next day.
@@ -396,7 +473,7 @@ class World(object):
     along with Participant state, into a dict and pull it out on the next
     day's encounter of the same room to construct a complete session segment.
 
-    Each day's bucket consists of session segments that end (since then we
+    Each day's bucket consists of session segments that end (so we
     don't have to go back and change any days we've already done) on that day.
     Instead of counting how many rooms ever had a sendrecv, we count how many
     sessions ever had one. This seems the most useful daily bucketing in the
@@ -486,6 +563,65 @@ def counts_for_day(segments):
     return counter
 
 
+def successes(segments):
+    """Yield segments which eventually get to sendrecv."""
+    for segment in segments:
+        if furthest_state(segment) == 'sendrecv':
+            yield segment
+
+
+def failures(segments):
+    """Yield segments which never reach sendrecv."""
+    for segment in segments:
+        if furthest_state(segment) != 'sendrecv':
+            yield segment
+
+
+def success_duration_histogram(segments):
+    """Return an iterable of lengths of time it takes to get from tryst to
+    sendrecv."""
+    # Answer: 90% in <7s, 99% in <23s, from running against most of 8/13/2015. I guess I want to see if the failures are more slanted toward short intervals than this histogram.
+    for segment in segments:
+        room = Room()
+        start = None
+        for event in segment:
+            room.do(event)
+            if start is None and room.in_session:
+                start = event.timestamp
+            if isinstance(event, SendRecv):
+                if start is None:
+                    yield 0  # Weirdness. Timestamp slop?
+                else:
+                    yield (event.timestamp - start).seconds
+                break
+
+
+def failure_duration_histogram(segments):
+    """Return an iterable of at-least durations from when 2 people tryst to when
+    there's only 1 person in the room.
+
+    Actual duration is *at least* what's returned, almost certainly more, but
+    we don't have easy access to the finishing event, which is in the next
+    segment. But the point here is to see if there are an unusual number of 0s
+    in the output, as in things didn't have enough time to negotiate a
+    connection.
+
+    """
+    # A full 52% of these come out as 0. That suggests a lot failures could be due to having insufficient time for negotiation (though, of course, it really means "at least 0", not exactly 0, so take that into account. Next, it would be nice to get actual numbers for this, not just "at least" ones.
+    for segment in segments:
+        room = Room()
+        start = None
+        for event in segment:
+            room.do(event)
+            if room.in_session:
+                start = event.timestamp
+                break
+        if start is not None:  # otherwise, 2 people never met. Impossible?
+            yield (segment[-1].timestamp - start).seconds
+        else:
+            yield "Inconceivable!"
+
+
 def update_metrics(es, version, metrics, world):
     """Update metrics with today's (and previous missed days') data.
 
@@ -538,6 +674,7 @@ def main():
                        password=environ['ES_PASSWORD'],
                        ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
+
     # Get previous metrics and midnight-spanning room state from buckets:
     metrics_bucket = VersionedJsonBucket(
         bucket_name='net-mozaws-prod-metrics-data',
