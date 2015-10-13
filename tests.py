@@ -3,7 +3,7 @@ from unittest import TestCase
 
 from nose.tools import eq_, ok_
 
-from state_histogram import Join, Leave, Refresh, Room, Timeout, World
+from state_histogram import Join, Leave, Refresh, SendRecv, Room, Timeout, World, furthest_state
 
 
 CLICKER = True
@@ -108,3 +108,28 @@ class WorldTests(TestCase):
 
         # Run Day B.
         eq_(list(w.do([e7, e8, e9, e10])), [[timeout3, e4, e5, e6, e7], [timeout4, e8, e9, e10]])
+
+
+class FurthestStateTests(TestCase):
+    """Tests for furthest_state()"""
+
+    def test_ff_40(self):
+        """Make sure we demand both the built-in client and the link-clicker
+        reach a state before we consider it reached, as long as at least FF 40
+        was used by the built-in participant."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40),
+            Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
+            SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40)]
+        # They didn't both reach SendRecv:
+        eq_(furthest_state(events), Join)
+
+    def test_ff_39(self):
+        """Just go by the linkclicker data if the built-in participant is using
+        FF < 40."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 39),
+            Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
+            SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40)]
+        # They didn't both reach SendRecv:
+        eq_(furthest_state(events), SendRecv)

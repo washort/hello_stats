@@ -41,7 +41,7 @@ from pyelasticsearch import ElasticSearch
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 6
+VERSION = 7
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
@@ -138,25 +138,29 @@ def events_from_day(iso_day, es, size=1000000):
         source = hit['_source']
         action_and_state = source.get('action'), source.get('state')
         try:
-            class_ = EVENT_CLASSES[action_and_state]
+            class_ = EVENT_CLASSES_BY_ACTION_AND_STATE[action_and_state]
         except KeyError:
             print "Unexpected action/state pair: %s" % (action_and_state,)
             continue
         yield class_(
             token=source['token'],
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
-            timestamp=decode_es_datetime(source['Timestamp']))
+            timestamp=decode_es_datetime(source['Timestamp']),
+            browser=source['user_agent_browser'],
+            version=source['user_agent_version'])
 
 
 class Event(object):
-    # state_num: An int whose greater magnitude represents more advanced
+    # progression: An int whose greater magnitude represents more advanced
     # progression through the room states, culminating in sendrecv. Everything
     # is pretty arbitrary except that SendRecv has the max.
 
-    def __init__(self, token, is_clicker, timestamp):
+    def __init__(self, token, is_clicker, timestamp, browser=None, version=None):
         self.token = token
         self.is_clicker = is_clicker
         self.timestamp = timestamp
+        self.browser = browser
+        self.version = version  # int or None
 
     def __str__(self):
         return '<%s %s by %s at %s>' % (
@@ -181,45 +185,61 @@ class Event(object):
     def __eq__(self, other):
         return self.__dict__ == other.__dict__
 
+    @classmethod
+    def name(cls):
+        return cls.__name__.lower()
+
+    @property
+    def firefox_version(self):
+        """Return the integral Firefox major version that sent me.
+
+        If it isn't Firefox at all, return 0.
+
+        """
+        return self.version if self.browser == 'Firefox' else 0
+
 
 class Timeout(Event):
     """A virtual event we materialize to represent a user timing out"""
-    state_num = -100
+    progression = -100
 
 
 class Refresh(Event):
-    state_num = -3
+    # This has a very low precedence because it happens every 5 minutes,
+    # regardless of progression through other states. We wouldn't want it to
+    # obscure more interesting states.
+    progression = -3
 
 
 class Leave(Event):
-    state_num = -2
+    progression = -2
 
 
 class Join(Event):
-    state_num = -1
+    progression = -1
 
 
 class Waiting(Event):
-    state_num = 0
+    progression = 0
 
 
 class Starting(Event):
-    state_num = 1
+    progression = 1
 
 
 class Receiving(Event):
-    state_num = 2
+    progression = 2
 
 
 class Sending(Event):
-    state_num = 3
+    progression = 3
 
 
 class SendRecv(Event):
-    state_num = 4  # must be the max
+    progression = 4  # must be the max
 
 
-EVENT_CLASSES = {
+EVENT_CLASSES_BY_ACTION_AND_STATE = {
     ('join', None): Join,
     ('leave', None): Leave,
     ('refresh', None): Refresh,
@@ -229,6 +249,10 @@ EVENT_CLASSES = {
     ('status', 'sending'): Sending,
     ('status', 'sendrecv'): SendRecv
 }
+EVENT_CLASSES_BEST_FIRST = sorted(
+    EVENT_CLASSES_BY_ACTION_AND_STATE.itervalues(),
+    key=lambda e: e.progression,
+    reverse=True)
 
 
 class Participant(object):
@@ -267,16 +291,40 @@ class Participant(object):
                            last.timestamp + TIMEOUT_DURATION)
 
 
+PROGRESSION_TO_EVENT_CLASS = {
+    cls.progression: cls
+    for cls in EVENT_CLASSES_BY_ACTION_AND_STATE.itervalues()}
 
-NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
-                for cls in EVENT_CLASSES.values()}
+
+def fence(predicate, iterable):
+    """Split an iterable into 2 lists according to a predicate."""
+    pred_true = []
+    pred_false = []
+    for item in iterable:
+        (pred_true if predicate(item) else pred_false).append(item)
+    return pred_true, pred_false
 
 
 def furthest_state(events):
-    """Return the closest state to sendrecv reached in a series of events."""
-    # TODO: In Firefox 40 and up, we start sending state events from the
-    # built-in client, so demand a sendrecv from both users.
-    return NUM_TO_STATE[max(e.state_num for e in events)]
+    """Return the closest state to sendrecv reached in a series of events.
+
+    If the built-in user is using FF 40 or later, take advantage of the state
+    reporting it provides, and demand that both the link-clicker and the
+    built-in user reach a state before it is deemed the "furthest".
+
+    If not, report on just the link-clicker.
+
+    """
+    clicker_events, built_in_events = fence(lambda e: e.is_clicker, events)
+    clicker_states = set(type(e) for e in clicker_events)
+    if min(e.firefox_version for e in built_in_events) >= 40:
+        # If a browser < 40 is used at any point, don't expect too much of the
+        # data.
+        built_in_states = set(type(e) for e in built_in_events)
+        states = built_in_states & clicker_states
+    else:
+        states = clicker_states
+    return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
 
 
 class Bucket(object):
@@ -552,14 +600,8 @@ def counts_for_day(segments):
     counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
                             'receiving', 'sending', 'sendrecv'])
     for segment in segments:
-        # In each segment, here are the furthest states reached by the
-        # link-clicker. (The link-clicker's state is easier to track.)
         furthest = furthest_state(segment)
-        counter.incr(furthest)
-    # Of rooms in which there were ever 2 people simultaneously, here are the
-    # furthest states reached by the link-clicker. (The link-clicker's state
-    # is easier to track. "Further" states are toward the bottom of the
-    # histogram.)"
+        counter.incr(furthest.name)
     return counter
 
 
