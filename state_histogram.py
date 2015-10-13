@@ -182,12 +182,21 @@ class Event(object):
         return self.__dict__ == other.__dict__
 
 
-class Join(Event):
-    state_num = -1
+class Timeout(Event):
+    """A virtual event we materialize to represent a user timing out"""
+    state_num = -100
+
+
+class Refresh(Event):
+    state_num = -3
 
 
 class Leave(Event):
     state_num = -2
+
+
+class Join(Event):
+    state_num = -1
 
 
 class Waiting(Event):
@@ -208,15 +217,6 @@ class Sending(Event):
 
 class SendRecv(Event):
     state_num = 4  # must be the max
-
-
-class Refresh(Event):
-    state_num = -3
-
-
-class Timeout(Event):
-    """A virtual event we materialize to represent a user timing out"""
-    state_num = -100
 
 
 EVENT_CLASSES = {
