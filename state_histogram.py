@@ -46,7 +46,7 @@ VERSION = 6
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
 # 4/30, as the sendrecv rate is ridiculously low, so I'm starting at 5/1.
-BEGINNING_OF_TIME = date(2015, 8, 20)
+BEGINNING_OF_TIME = date(2015, 8, 22)
 
 # Number of seconds without network activity to allow before assuming a room
 # participant is timed out. When this many seconds goes by, they time out.
