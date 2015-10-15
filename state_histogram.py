@@ -129,7 +129,9 @@ def events_from_day(iso_day, es, size=1000000):
         },
         'sort': ['token.raw', 'Timestamp'],
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
-        '_source': {'include': ['action', 'token', 'userType', 'state', 'Timestamp']}
+        '_source': {'include': ['action', 'token', 'userType', 'state',
+                                'Timestamp', 'user_agent_browser',
+                                'user_agent_version']}
     },
     index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
@@ -255,6 +257,57 @@ EVENT_CLASSES_BEST_FIRST = sorted(
     reverse=True)
 
 
+class Segment(object):
+    """An iterable of events, plus some metadata about the collection as a
+    whole"""
+
+    def __init__(self, events=None):
+        """
+        :arg events: A list of events for me to encompass
+        """
+        self._events = events or []
+
+    def append(self, event):
+        self._events.append(event)
+
+    def extend(self, events):
+        self._events.extend(events)
+
+    def __nonzero__(self):
+        return bool(self._events)
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def furthest_state(self):
+        """Return the closest state to sendrecv reached in me.
+
+        If the built-in user is using FF 40 or later, take advantage of the
+        state reporting it provides, and demand that both the link-clicker and
+        the built-in user reach a state before it is deemed the "furthest".
+
+        If not, report on just the link-clicker.
+
+        """
+        clicker_events, built_in_events = fence(lambda e: e.is_clicker, self)
+        clicker_states = set(type(e) for e in clicker_events)
+        if min(e.firefox_version for e in built_in_events) >= 40:
+            # If a browser < 40 is used at any point, don't expect too much of the
+            # data.
+            built_in_states = set(type(e) for e in built_in_events)
+            states = built_in_states & clicker_states
+        else:
+            states = clicker_states
+        try:
+            return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
+        except ValueError:
+            import pdb;pdb.set_trace()
+
+    def is_failure(self):
+        """Return whether I have failed."""
+        return self.furthest_state() is not SendRecv
+
+
 class Participant(object):
     def __init__(self):
         # Whether I am in the room:
@@ -262,9 +315,11 @@ class Participant(object):
         # The last network activity I did. If I've done none since I last
         # exited the room, None:
         self.last_event = None
+        self.states_reached = set()
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
+        self.states_reached.add(type(event))
         if isinstance(event, Leave):
             self.in_room = False
             self.last_event = None
@@ -303,28 +358,6 @@ def fence(predicate, iterable):
     for item in iterable:
         (pred_true if predicate(item) else pred_false).append(item)
     return pred_true, pred_false
-
-
-def furthest_state(events):
-    """Return the closest state to sendrecv reached in a series of events.
-
-    If the built-in user is using FF 40 or later, take advantage of the state
-    reporting it provides, and demand that both the link-clicker and the
-    built-in user reach a state before it is deemed the "furthest".
-
-    If not, report on just the link-clicker.
-
-    """
-    clicker_events, built_in_events = fence(lambda e: e.is_clicker, events)
-    clicker_states = set(type(e) for e in clicker_events)
-    if min(e.firefox_version for e in built_in_events) >= 40:
-        # If a browser < 40 is used at any point, don't expect too much of the
-        # data.
-        built_in_states = set(type(e) for e in built_in_events)
-        states = built_in_states & clicker_states
-    else:
-        states = clicker_states
-    return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
 
 
 class Bucket(object):
@@ -398,7 +431,7 @@ class Room(object):
     def _clear(self):
         self.clicker = Participant()
         self.built_in = Participant()
-        self.segment = []
+        self.segment = Segment()
         self.in_session = False  # whether there are 2 people in the room
 
     def do(self, event):
@@ -414,7 +447,7 @@ class Room(object):
                 timeouts.append(other_timeout)
             timeouts.sort(key=lambda e: e.timestamp)
             return timeouts
-
+# When a Participant leaves or times out, is his states_reached reset? Very probably.
         # Assumption: There is <=1 link-clicker and <=1 built-in client in
         # each room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
@@ -444,7 +477,7 @@ class Room(object):
                     # It wasn't a timeout that ended the session; it must have
                     # been the event, so include it:
                     self.segment.append(event)
-                    next_segment = []
+                    next_segment = Segment()
 
                 ret, self.segment = self.segment, next_segment
                 return ret
@@ -552,6 +585,10 @@ class World(object):
         """
         for token, a_rooms_events in groupby(a_days_events, lambda e: e.token):  # for each room
             todays_rooms.add(token)
+            if token == '-nGKotxv31M':
+                a_rooms_events = list(a_rooms_events)
+                import pdb;pdb.set_trace()
+
             room = self._rooms.pop(token, Room())  # grab saved state, if any
             for event in a_rooms_events:
                 segment = room.do(event)  # update Participants, return a segment if it just finished (and clear internal segment buffer), None otherwise
@@ -600,23 +637,9 @@ def counts_for_day(segments):
     counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
                             'receiving', 'sending', 'sendrecv'])
     for segment in segments:
-        furthest = furthest_state(segment)
+        furthest = segment.furthest_state()
         counter.incr(furthest.name)
     return counter
-
-
-def successes(segments):
-    """Yield segments which eventually get to sendrecv."""
-    for segment in segments:
-        if furthest_state(segment) == 'sendrecv':
-            yield segment
-
-
-def failures(segments):
-    """Yield segments which never reach sendrecv."""
-    for segment in segments:
-        if furthest_state(segment) != 'sendrecv':
-            yield segment
 
 
 def success_duration_histogram(segments):
@@ -745,10 +768,6 @@ if __name__ == '__main__':
 # Observations:
 #
 # * Most rooms never see 2 people meet: 20K lonely rooms vs. 1500 meeting ones.
-# * There are many sessions consisting of nothing by Refresh events,
-#   generally a mix of clickers and built-ins. Where are the joins? On a
-#   previous day? It would be interesting to see if these happen near the
-#   beginnings of days.
 # * There are some sessions in which leaves happen without symmetric joins.
 #   See if these occur near the beginning of days. Otherwise, I would expect
 #   at least Refreshes every 5 minutes.

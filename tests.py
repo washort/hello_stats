@@ -3,7 +3,7 @@ from unittest import TestCase
 
 from nose.tools import eq_, ok_
 
-from state_histogram import Join, Leave, Refresh, SendRecv, Room, Timeout, World, furthest_state
+from state_histogram import Join, Leave, Refresh, SendRecv, Room, Segment, Timeout, Waiting, World
 
 
 CLICKER = True
@@ -122,7 +122,7 @@ class FurthestStateTests(TestCase):
             Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
             SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40)]
         # They didn't both reach SendRecv:
-        eq_(furthest_state(events), Join)
+        eq_(Segment(events).furthest_state(), Join)
 
     def test_ff_39(self):
         """Just go by the linkclicker data if the built-in participant is using
@@ -132,4 +132,43 @@ class FurthestStateTests(TestCase):
             Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
             SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40)]
         # They didn't both reach SendRecv:
-        eq_(furthest_state(events), SendRecv)
+        eq_(Segment(events).furthest_state(), SendRecv)
+
+    def test_solo_segment(self):
+        """Take the other user's states into account even if there's only 1
+        user in the segment.
+
+        World.do() would sometimes return segments that contain only built-ins.
+        This can happen if A joins, B joins, B leaves, then B rejoins. This
+        test asserts that we can still get at the state info from the user A.
+
+        """
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 0)),
+            Waiting('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 5)),
+
+            Join('a', CLICKER, datetime(2015, 1, 1, 1, 0, 10)),
+            Leave('a', CLICKER, datetime(2015, 1, 1, 1, 0, 20)),
+
+            Join('a', CLICKER, datetime(2015, 1, 1, 1, 0, 30)),
+            Leave('a', CLICKER, datetime(2015, 1, 1, 1, 0, 40))]
+        world = World()
+        last_segment = list(world.do(events))[-1]
+        eq_(last_segment.furthest_state(), Waiting)
+
+
+# Right now, World.do() sometimes returns segments that have only built-ins in them. I assumed that wouldn't happen, but it can if A joins, B joins, B leaves, then B rejoins:
+# So I guess we have to have a path from a segment back to the room state at that time?--so we can grab the Participant and look at his states_reached.
+
+# [<Join -nGKotxv31M by clicker at 2015-08-20 18:52:15.382000>,
+#  <Sending -nGKotxv31M by clicker at 2015-08-20 18:52:25.180000>,
+#  <Waiting -nGKotxv31M by clicker at 2015-08-20 18:52:26.816000>,
+#  <Refresh -nGKotxv31M by clicker at 2015-08-20 18:56:47.499000>,
+#  <Join -nGKotxv31M by built-in at 2015-08-20 18:59:04.457000>,
+#  <Waiting -nGKotxv31M by built-in at 2015-08-20 18:59:05.988000>,
+#  <Sending -nGKotxv31M by built-in at 2015-08-20 18:59:06.124000>,
+#  <Leave -nGKotxv31M by built-in at 2015-08-20 19:00:09.918000>, # end of seg 1
+#  <Join -nGKotxv31M by built-in at 2015-08-20 19:00:18.575000>, # start of seg 2 (clicker is still in here)
+#  <Waiting -nGKotxv31M by built-in at 2015-08-20 19:00:20.185000>,
+#  <Sending -nGKotxv31M by built-in at 2015-08-20 19:00:20.401000>,
+#  <Leave -nGKotxv31M by built-in at 2015-08-20 19:00:25.519000>]
