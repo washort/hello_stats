@@ -162,7 +162,7 @@ class Event(object):
         self.is_clicker = is_clicker
         self.timestamp = timestamp
         self.browser = browser
-        self.version = version  # int or None
+        self.version = version if version else None  # int or None, never 0
 
     def __str__(self):
         return '<%s %s by %s at %s>' % (
@@ -195,10 +195,10 @@ class Event(object):
     def firefox_version(self):
         """Return the integral Firefox major version that sent me.
 
-        If it isn't Firefox at all, return 0.
+        If it isn't Firefox at all, return None.
 
         """
-        return self.version if self.browser == 'Firefox' else 0
+        return self.version if self.browser == 'Firefox' else None
 
 
 class Timeout(Event):
@@ -273,6 +273,23 @@ class Segment(object):
     def extend(self, events):
         self._events.extend(events)
 
+    def snapshotting(self, built_in, clicker):
+        """Copy some state we want to preserve from the room participants.
+
+        This accounts for situations in which, say, A joins, then B joins and
+        leaves, then B rejoins. In that case, the 2nd segment would not contain
+        any A events, but we still need to take A's reached states into
+        account. A caller can use snapshotting() to pass them in. We copy so
+        future mutations of the participants don't change our data.
+
+        Return self.
+
+        """
+        self._built_in_states = built_in.states_reached.copy()
+        self._min_firefox_version = built_in.min_firefox_version
+        self._clicker_states = clicker.states_reached.copy()
+        return self
+
     def __nonzero__(self):
         return bool(self._events)
 
@@ -289,19 +306,12 @@ class Segment(object):
         If not, report on just the link-clicker.
 
         """
-        clicker_events, built_in_events = fence(lambda e: e.is_clicker, self)
-        clicker_states = set(type(e) for e in clicker_events)
-        if min(e.firefox_version for e in built_in_events) >= 40:
+        states = self._clicker_states
+        if self._min_firefox_version and self._min_firefox_version >= 40:
             # If a browser < 40 is used at any point, don't expect too much of the
             # data.
-            built_in_states = set(type(e) for e in built_in_events)
-            states = built_in_states & clicker_states
-        else:
-            states = clicker_states
-        try:
-            return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
-        except ValueError:
-            import pdb;pdb.set_trace()
+            states &= self._built_in_states
+        return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
 
     def is_failure(self):
         """Return whether I have failed."""
@@ -310,19 +320,43 @@ class Segment(object):
 
 class Participant(object):
     def __init__(self):
+        self._clear_most()
+        self._maybe_clear_rest()
+
+    def _clear_most(self):
+        """Clear the fields that should clear immediately upon leaving."""
         # Whether I am in the room:
         self.in_room = False
         # The last network activity I did. If I've done none since I last
         # exited the room, None:
         self.last_event = None
-        self.states_reached = set()
+        self._just_cleared_most = True
+
+    def _maybe_clear_rest(self):
+        """Clear the fields that we let persist after a leave, just until the
+        next join.
+
+        We leave these fields alone when a participant leaves (or times out of)
+        a room so we can still see what the furthest state reached (or the min
+        FF version) was. They then get cleared automatically right before the
+        next event.
+
+        """
+        if self._just_cleared_most:
+            self._just_cleared_most = False
+            self.states_reached = set()
+            # Minimum FF version used by built-in client:
+            self.min_firefox_version = None  # None or int > 0
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
+        self._maybe_clear_rest()
         self.states_reached.add(type(event))
+        if not event.is_clicker and event.firefox_version:
+            self.min_firefox_version = min(event.firefox_version,
+                                           self.min_firefox_version or 10000)
         if isinstance(event, Leave):
-            self.in_room = False
-            self.last_event = None
+            self._clear_most()
         else:  # Any other kind of event means he's in the room.
             # Refreshing means you're saying "I'm in the room!" Adding Refresh
             # drops the number of leaves-before-joins from 44 to 35 on a
@@ -337,10 +371,10 @@ class Participant(object):
         If this causes him to timeout, return a Timeout.
 
         """
+        self._maybe_clear_rest()
         last = self.last_event
-        if last and timestamp - last.timestamp >= TIMEOUT_DURATION:
-            self.in_room = False  # timed out
-            self.last_event = None
+        if last and timestamp - last.timestamp >= TIMEOUT_DURATION:  # timed out
+            self._clear_most()
             return Timeout(last.token,
                            last.is_clicker,
                            last.timestamp + TIMEOUT_DURATION)
@@ -447,9 +481,9 @@ class Room(object):
                 timeouts.append(other_timeout)
             timeouts.sort(key=lambda e: e.timestamp)
             return timeouts
-# When a Participant leaves or times out, is his states_reached reset? Very probably.
-        # Assumption: There is <=1 link-clicker and <=1 built-in client in
-        # each room. This is not actually strictly true: it is possible for 2
+
+        # Assumption: There is <=1 link-clicker and <=1 built-in client in each
+        # room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
         doer, other = ((self.clicker, self.built_in) if event.is_clicker
                        else (self.built_in, self.clicker))
@@ -472,7 +506,7 @@ class Room(object):
                     # Start the next segment with the event after the ending
                     # timeout, whether it's another timeout or the event
                     # itself:
-                    next_segment = timeouts + [event]
+                    next_segment = Segment(timeouts + [event])
                 else:
                     # It wasn't a timeout that ended the session; it must have
                     # been the event, so include it:
@@ -480,7 +514,8 @@ class Room(object):
                     next_segment = Segment()
 
                 ret, self.segment = self.segment, next_segment
-                return ret
+                return ret.snapshotting(built_in=self.built_in,
+                                        clicker=self.clicker)
             else:  # still in session, so nobody timed out
                 self.segment.append(event)
         else:
@@ -524,7 +559,8 @@ class Room(object):
             timeout = longest_since_spoke.advance_to(FAR_FUTURE)
             assert timeout
             self.segment.append(timeout)
-            ret = self.segment
+            ret = self.segment.snapshotting(built_in=self.built_in,
+                                            clicker=self.clicker)
         else:
             ret = None
         self._clear()
