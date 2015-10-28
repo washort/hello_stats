@@ -3,7 +3,8 @@ from unittest import TestCase
 
 from nose.tools import eq_, ok_
 
-from state_histogram import Join, Leave, Refresh, SendRecv, Room, Segment, Sending, Starting, Timeout, Waiting, World
+from hello_stats.events import Join, Leave, Refresh, SendRecv, Sending, Starting, Timeout, Waiting
+from hello_stats.sessions import Room, Segment, World
 
 
 CLICKER = True
