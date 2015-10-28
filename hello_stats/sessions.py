@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from itertools import groupby
+from pprint import pformat
 
 from hello_stats.events import EVENT_CLASSES_WORST_FIRST, PROGRESSION_TO_EVENT_CLASS, Leave, Timeout, TIMEOUT_DURATION
 
@@ -44,6 +45,9 @@ class Segment(object):
 
     def __iter__(self):
         return iter(self._events)
+
+    def __str__(self):
+        return pformat(self._events)
 
     def furthest_state(self):
         """Return the closest state to sendrecv reached in me.
