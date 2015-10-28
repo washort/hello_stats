@@ -35,7 +35,7 @@ import cPickle as pickle
 
 from boto.s3.connection import S3Connection
 from boto.s3.key import Key
-from pyelasticsearch import ElasticSearch
+from pyelasticsearch import ElasticSearch, ElasticHttpNotFoundError
 
 
 # Update this, and the next update will wipe out all saved data and start from
@@ -46,7 +46,7 @@ VERSION = 7
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
 # 4/30, as the sendrecv rate is ridiculously low, so I'm starting at 5/1.
-BEGINNING_OF_TIME = date(2015, 8, 20)
+BEGINNING_OF_TIME = date(2015, 9, 3)
 
 # Number of seconds without network activity to allow before assuming a room
 # participant is timed out. When this many seconds goes by, they time out.
@@ -750,8 +750,12 @@ def update_metrics(es, version, metrics, world):
         iso_day = day.isoformat()
         print "Computing furthest-state histogram for %s..." % iso_day
 
-        segments = world.do(events_from_day(iso_day, es))
-        counts = counts_for_day(segments)
+        try:
+            segments = world.do(events_from_day(iso_day, es))
+            counts = counts_for_day(segments)
+        except ElasticHttpNotFoundError:
+            print 'Index not found. Proceeding to next day.'
+            continue
         print counts
         print "%s sessions span midnight (%s%%)." % (len(world._rooms), len(world._rooms) / float(counts.total) * 100)
         a_days_metrics = counts.as_dict()
