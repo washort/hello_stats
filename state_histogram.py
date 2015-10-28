@@ -148,8 +148,8 @@ def events_from_day(iso_day, es, size=1000000):
             token=source['token'],
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
             timestamp=decode_es_datetime(source['Timestamp']),
-            browser=source['user_agent_browser'],
-            version=source['user_agent_version'])
+            browser=source.get('user_agent_browser', ''),
+            version=source.get('user_agent_version', 0))
 
 
 class Event(object):
@@ -306,11 +306,15 @@ class Segment(object):
         If not, report on just the link-clicker.
 
         """
-        states = self._clicker_states
+        states = self._clicker_states.copy()
         if self._min_firefox_version and self._min_firefox_version >= 40:
             # If a browser < 40 is used at any point, don't expect too much of the
             # data.
             states &= self._built_in_states
+            if not states:
+                # This happens less than once in 1000 sessions.
+                print 'No common states between built-in and clicker. This may be due to timing slop. Going with max state.'
+                states = self._clicker_states | self._built_in_states
         return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
 
     def is_failure(self):

@@ -3,7 +3,7 @@ from unittest import TestCase
 
 from nose.tools import eq_, ok_
 
-from state_histogram import Join, Leave, Refresh, SendRecv, Room, Segment, Timeout, Waiting, World
+from state_histogram import Join, Leave, Refresh, SendRecv, Room, Segment, Sending, Starting, Timeout, Waiting, World
 
 
 CLICKER = True
@@ -162,3 +162,25 @@ class FurthestStateTests(TestCase):
         world = World()
         last_segment = list(world.do(events))[-1]
         eq_(last_segment.furthest_state(), Waiting)
+
+    def test_empty_intersection(self):
+        """If the intersection betweeen built-in and clicker states is empty,
+        perhaps due to time slop and consequent bad event ordering, be
+        charitable and go with the most advanced state, as we would like to
+        avoid false failures."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 5), version=40, browser='Firefox'),
+            Waiting('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 10), version=40, browser='Firefox'),
+            Sending('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 15), version=40, browser='Firefox'),
+
+            Join('a', CLICKER, datetime(2015, 1, 1, 1, 0, 20)),
+
+            # Leave and Start are switched due to time slop:
+            Leave('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 25), version=40, browser='Firefox'),
+            Starting('a', BUILT_IN, datetime(2015, 1, 1, 1, 0, 30), version=40, browser='Firefox'),
+
+            Leave('a', CLICKER, datetime(2015, 1, 1, 1, 0, 35))
+            ]
+        world = World()
+        last_segment = list(world.do(events))[-1]
+        eq_(last_segment.furthest_state(), Starting)
