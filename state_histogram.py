@@ -251,10 +251,9 @@ EVENT_CLASSES_BY_ACTION_AND_STATE = {
     ('status', 'sending'): Sending,
     ('status', 'sendrecv'): SendRecv
 }
-EVENT_CLASSES_BEST_FIRST = sorted(
+EVENT_CLASSES_WORST_FIRST = sorted(
     EVENT_CLASSES_BY_ACTION_AND_STATE.itervalues(),
-    key=lambda e: e.progression,
-    reverse=True)
+    key=lambda e: e.progression)
 
 
 class Segment(object):
@@ -625,9 +624,6 @@ class World(object):
         """
         for token, a_rooms_events in groupby(a_days_events, lambda e: e.token):  # for each room
             todays_rooms.add(token)
-            if token == '-nGKotxv31M':
-                a_rooms_events = list(a_rooms_events)
-                import pdb;pdb.set_trace()
 
             room = self._rooms.pop(token, Room())  # grab saved state, if any
             for event in a_rooms_events:
@@ -674,11 +670,10 @@ class World(object):
 def counts_for_day(segments):
     """Return a StateCounter conveying a histogram of the segments' furthest
     states."""
-    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
-                            'receiving', 'sending', 'sendrecv'])
+    counter = StateCounter(c.name() for c in EVENT_CLASSES_WORST_FIRST)
     for segment in segments:
         furthest = segment.furthest_state()
-        counter.incr(furthest.name)
+        counter.incr(furthest.name())
     return counter
 
 
