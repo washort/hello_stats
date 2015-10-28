@@ -35,18 +35,18 @@ import cPickle as pickle
 
 from boto.s3.connection import S3Connection
 from boto.s3.key import Key
-from pyelasticsearch import ElasticSearch
+from pyelasticsearch import ElasticSearch, ElasticHttpNotFoundError
 
 
 # Update this, and the next update will wipe out all saved data and start from
 # scratch. A good reason to do this is if you improve the accuracy of the
 # computations.
-VERSION = 6
+VERSION = 7
 
 # The first date for which data for this metric was available in ES is 4/30.
 # Before this, the userType field is missing. I suspect the data is wrong on
 # 4/30, as the sendrecv rate is ridiculously low, so I'm starting at 5/1.
-BEGINNING_OF_TIME = date(2015, 8, 22)
+BEGINNING_OF_TIME = date(2015, 9, 3)
 
 # Number of seconds without network activity to allow before assuming a room
 # participant is timed out. When this many seconds goes by, they time out.
@@ -129,7 +129,9 @@ def events_from_day(iso_day, es, size=1000000):
         },
         'sort': ['token.raw', 'Timestamp'],
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
-        '_source': {'include': ['action', 'token', 'userType', 'state', 'Timestamp']}
+        '_source': {'include': ['action', 'token', 'userType', 'state',
+                                'Timestamp', 'user_agent_browser',
+                                'user_agent_version']}
     },
     index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
@@ -138,25 +140,29 @@ def events_from_day(iso_day, es, size=1000000):
         source = hit['_source']
         action_and_state = source.get('action'), source.get('state')
         try:
-            class_ = EVENT_CLASSES[action_and_state]
+            class_ = EVENT_CLASSES_BY_ACTION_AND_STATE[action_and_state]
         except KeyError:
             print "Unexpected action/state pair: %s" % (action_and_state,)
             continue
         yield class_(
             token=source['token'],
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
-            timestamp=decode_es_datetime(source['Timestamp']))
+            timestamp=decode_es_datetime(source['Timestamp']),
+            browser=source.get('user_agent_browser', ''),
+            version=source.get('user_agent_version', 0))
 
 
 class Event(object):
-    # state_num: An int whose greater magnitude represents more advanced
+    # progression: An int whose greater magnitude represents more advanced
     # progression through the room states, culminating in sendrecv. Everything
     # is pretty arbitrary except that SendRecv has the max.
 
-    def __init__(self, token, is_clicker, timestamp):
+    def __init__(self, token, is_clicker, timestamp, browser=None, version=None):
         self.token = token
         self.is_clicker = is_clicker
         self.timestamp = timestamp
+        self.browser = browser
+        self.version = version if version else None  # int or None, never 0
 
     def __str__(self):
         return '<%s %s by %s at %s>' % (
@@ -181,45 +187,61 @@ class Event(object):
     def __eq__(self, other):
         return self.__dict__ == other.__dict__
 
+    @classmethod
+    def name(cls):
+        return cls.__name__.lower()
+
+    @property
+    def firefox_version(self):
+        """Return the integral Firefox major version that sent me.
+
+        If it isn't Firefox at all, return None.
+
+        """
+        return self.version if self.browser == 'Firefox' else None
+
 
 class Timeout(Event):
     """A virtual event we materialize to represent a user timing out"""
-    state_num = -100
+    progression = -100
 
 
 class Refresh(Event):
-    state_num = -3
+    # This has a very low precedence because it happens every 5 minutes,
+    # regardless of progression through other states. We wouldn't want it to
+    # obscure more interesting states.
+    progression = -3
 
 
 class Leave(Event):
-    state_num = -2
+    progression = -2
 
 
 class Join(Event):
-    state_num = -1
+    progression = -1
 
 
 class Waiting(Event):
-    state_num = 0
+    progression = 0
 
 
 class Starting(Event):
-    state_num = 1
+    progression = 1
 
 
 class Receiving(Event):
-    state_num = 2
+    progression = 2
 
 
 class Sending(Event):
-    state_num = 3
+    progression = 3
 
 
 class SendRecv(Event):
-    state_num = 4  # must be the max
+    progression = 4  # must be the max
 
 
-EVENT_CLASSES = {
+EVENT_CLASSES_BY_ACTION_AND_STATE = {
     ('join', None): Join,
     ('leave', None): Leave,
     ('refresh', None): Refresh,
@@ -229,21 +251,115 @@ EVENT_CLASSES = {
     ('status', 'sending'): Sending,
     ('status', 'sendrecv'): SendRecv
 }
+EVENT_CLASSES_WORST_FIRST = sorted(
+    EVENT_CLASSES_BY_ACTION_AND_STATE.itervalues(),
+    key=lambda e: e.progression)
+
+
+class Segment(object):
+    """An iterable of events, plus some metadata about the collection as a
+    whole"""
+
+    def __init__(self, events=None):
+        """
+        :arg events: A list of events for me to encompass
+        """
+        self._events = events or []
+
+    def append(self, event):
+        self._events.append(event)
+
+    def extend(self, events):
+        self._events.extend(events)
+
+    def snapshotting(self, built_in, clicker):
+        """Copy some state we want to preserve from the room participants.
+
+        This accounts for situations in which, say, A joins, then B joins and
+        leaves, then B rejoins. In that case, the 2nd segment would not contain
+        any A events, but we still need to take A's reached states into
+        account. A caller can use snapshotting() to pass them in. We copy so
+        future mutations of the participants don't change our data.
+
+        Return self.
+
+        """
+        self._built_in_states = built_in.states_reached.copy()
+        self._min_firefox_version = built_in.min_firefox_version
+        self._clicker_states = clicker.states_reached.copy()
+        return self
+
+    def __nonzero__(self):
+        return bool(self._events)
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def furthest_state(self):
+        """Return the closest state to sendrecv reached in me.
+
+        If the built-in user is using FF 40 or later, take advantage of the
+        state reporting it provides, and demand that both the link-clicker and
+        the built-in user reach a state before it is deemed the "furthest".
+
+        If not, report on just the link-clicker.
+
+        """
+        states = self._clicker_states.copy()
+        if self._min_firefox_version and self._min_firefox_version >= 40:
+            # If a browser < 40 is used at any point, don't expect too much of the
+            # data.
+            states &= self._built_in_states
+            if not states:
+                # This happens less than once in 1000 sessions.
+                print 'No common states between built-in and clicker. This may be due to timing slop. Going with max state.'
+                states = self._clicker_states | self._built_in_states
+        return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
+
+    def is_failure(self):
+        """Return whether I have failed."""
+        return self.furthest_state() is not SendRecv
 
 
 class Participant(object):
     def __init__(self):
+        self._clear_most()
+        self._maybe_clear_rest()
+
+    def _clear_most(self):
+        """Clear the fields that should clear immediately upon leaving."""
         # Whether I am in the room:
         self.in_room = False
         # The last network activity I did. If I've done none since I last
         # exited the room, None:
         self.last_event = None
+        self._just_cleared_most = True
+
+    def _maybe_clear_rest(self):
+        """Clear the fields that we let persist after a leave, just until the
+        next join.
+
+        We leave these fields alone when a participant leaves (or times out of)
+        a room so we can still see what the furthest state reached (or the min
+        FF version) was. They then get cleared automatically right before the
+        next event.
+
+        """
+        if self._just_cleared_most:
+            self._just_cleared_most = False
+            self.states_reached = set()
+            # Minimum FF version used by built-in client:
+            self.min_firefox_version = None  # None or int > 0
 
     def do(self, event):
         """Update my state as if I'd just performed an Event."""
+        self._maybe_clear_rest()
+        self.states_reached.add(type(event))
+        if not event.is_clicker and event.firefox_version:
+            self.min_firefox_version = min(event.firefox_version,
+                                           self.min_firefox_version or 10000)
         if isinstance(event, Leave):
-            self.in_room = False
-            self.last_event = None
+            self._clear_most()
         else:  # Any other kind of event means he's in the room.
             # Refreshing means you're saying "I'm in the room!" Adding Refresh
             # drops the number of leaves-before-joins from 44 to 35 on a
@@ -258,25 +374,27 @@ class Participant(object):
         If this causes him to timeout, return a Timeout.
 
         """
+        self._maybe_clear_rest()
         last = self.last_event
-        if last and timestamp - last.timestamp >= TIMEOUT_DURATION:
-            self.in_room = False  # timed out
-            self.last_event = None
+        if last and timestamp - last.timestamp >= TIMEOUT_DURATION:  # timed out
+            self._clear_most()
             return Timeout(last.token,
                            last.is_clicker,
                            last.timestamp + TIMEOUT_DURATION)
 
 
+PROGRESSION_TO_EVENT_CLASS = {
+    cls.progression: cls
+    for cls in EVENT_CLASSES_BY_ACTION_AND_STATE.itervalues()}
 
-NUM_TO_STATE = {cls.state_num: cls.__name__.lower()
-                for cls in EVENT_CLASSES.values()}
 
-
-def furthest_state(events):
-    """Return the closest state to sendrecv reached in a series of events."""
-    # TODO: In Firefox 40 and up, we start sending state events from the
-    # built-in client, so demand a sendrecv from both users.
-    return NUM_TO_STATE[max(e.state_num for e in events)]
+def fence(predicate, iterable):
+    """Split an iterable into 2 lists according to a predicate."""
+    pred_true = []
+    pred_false = []
+    for item in iterable:
+        (pred_true if predicate(item) else pred_false).append(item)
+    return pred_true, pred_false
 
 
 class Bucket(object):
@@ -350,7 +468,7 @@ class Room(object):
     def _clear(self):
         self.clicker = Participant()
         self.built_in = Participant()
-        self.segment = []
+        self.segment = Segment()
         self.in_session = False  # whether there are 2 people in the room
 
     def do(self, event):
@@ -367,8 +485,8 @@ class Room(object):
             timeouts.sort(key=lambda e: e.timestamp)
             return timeouts
 
-        # Assumption: There is <=1 link-clicker and <=1 built-in client in
-        # each room. This is not actually strictly true: it is possible for 2
+        # Assumption: There is <=1 link-clicker and <=1 built-in client in each
+        # room. This is not actually strictly true: it is possible for 2
         # browsers to join if they're signed into the same FF Account.
         doer, other = ((self.clicker, self.built_in) if event.is_clicker
                        else (self.built_in, self.clicker))
@@ -391,15 +509,16 @@ class Room(object):
                     # Start the next segment with the event after the ending
                     # timeout, whether it's another timeout or the event
                     # itself:
-                    next_segment = timeouts + [event]
+                    next_segment = Segment(timeouts + [event])
                 else:
                     # It wasn't a timeout that ended the session; it must have
                     # been the event, so include it:
                     self.segment.append(event)
-                    next_segment = []
+                    next_segment = Segment()
 
                 ret, self.segment = self.segment, next_segment
-                return ret
+                return ret.snapshotting(built_in=self.built_in,
+                                        clicker=self.clicker)
             else:  # still in session, so nobody timed out
                 self.segment.append(event)
         else:
@@ -443,7 +562,8 @@ class Room(object):
             timeout = longest_since_spoke.advance_to(FAR_FUTURE)
             assert timeout
             self.segment.append(timeout)
-            ret = self.segment
+            ret = self.segment.snapshotting(built_in=self.built_in,
+                                            clicker=self.clicker)
         else:
             ret = None
         self._clear()
@@ -504,6 +624,7 @@ class World(object):
         """
         for token, a_rooms_events in groupby(a_days_events, lambda e: e.token):  # for each room
             todays_rooms.add(token)
+
             room = self._rooms.pop(token, Room())  # grab saved state, if any
             for event in a_rooms_events:
                 segment = room.do(event)  # update Participants, return a segment if it just finished (and clear internal segment buffer), None otherwise
@@ -549,32 +670,11 @@ class World(object):
 def counts_for_day(segments):
     """Return a StateCounter conveying a histogram of the segments' furthest
     states."""
-    counter = StateCounter(['leave', 'refresh', 'join', 'waiting', 'starting',
-                            'receiving', 'sending', 'sendrecv'])
+    counter = StateCounter(c.name() for c in EVENT_CLASSES_WORST_FIRST)
     for segment in segments:
-        # In each segment, here are the furthest states reached by the
-        # link-clicker. (The link-clicker's state is easier to track.)
-        furthest = furthest_state(segment)
-        counter.incr(furthest)
-    # Of rooms in which there were ever 2 people simultaneously, here are the
-    # furthest states reached by the link-clicker. (The link-clicker's state
-    # is easier to track. "Further" states are toward the bottom of the
-    # histogram.)"
+        furthest = segment.furthest_state()
+        counter.incr(furthest.name())
     return counter
-
-
-def successes(segments):
-    """Yield segments which eventually get to sendrecv."""
-    for segment in segments:
-        if furthest_state(segment) == 'sendrecv':
-            yield segment
-
-
-def failures(segments):
-    """Yield segments which never reach sendrecv."""
-    for segment in segments:
-        if furthest_state(segment) != 'sendrecv':
-            yield segment
 
 
 def success_duration_histogram(segments):
@@ -649,8 +749,12 @@ def update_metrics(es, version, metrics, world):
         iso_day = day.isoformat()
         print "Computing furthest-state histogram for %s..." % iso_day
 
-        segments = world.do(events_from_day(iso_day, es))
-        counts = counts_for_day(segments)
+        try:
+            segments = world.do(events_from_day(iso_day, es))
+            counts = counts_for_day(segments)
+        except ElasticHttpNotFoundError:
+            print 'Index not found. Proceeding to next day.'
+            continue
         print counts
         print "%s sessions span midnight (%s%%)." % (len(world._rooms), len(world._rooms) / float(counts.total) * 100)
         a_days_metrics = counts.as_dict()
@@ -703,10 +807,6 @@ if __name__ == '__main__':
 # Observations:
 #
 # * Most rooms never see 2 people meet: 20K lonely rooms vs. 1500 meeting ones.
-# * There are many sessions consisting of nothing by Refresh events,
-#   generally a mix of clickers and built-ins. Where are the joins? On a
-#   previous day? It would be interesting to see if these happen near the
-#   beginnings of days.
 # * There are some sessions in which leaves happen without symmetric joins.
 #   See if these occur near the beginning of days. Otherwise, I would expect
 #   at least Refreshes every 5 minutes.
