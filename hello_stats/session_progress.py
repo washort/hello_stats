@@ -34,13 +34,7 @@ from pyelasticsearch import ElasticSearch, ElasticHttpNotFoundError
 
 from hello_stats.events import BEGINNING_OF_TIME, EVENT_CLASSES_WORST_FIRST, events_from_day
 from hello_stats.sessions import World
-from hello_stats.storage import PickleBucket, VersionedJsonBucket
-
-
-# Update this, and the next update will wipe out all saved data and start from
-# scratch. A good reason to do this is if you improve the accuracy of the
-# computations.
-VERSION = 7
+from hello_stats.storage import VERSION, PickleBucket, VersionedJsonBucket
 
 
 class StateCounter(object):

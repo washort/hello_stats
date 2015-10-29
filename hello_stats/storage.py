@@ -7,6 +7,12 @@ from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 
 
+# Update this, and the next update will wipe out all saved data and start from
+# scratch. A good reason to do this is if you improve the accuracy of the
+# computations.
+VERSION = 7
+
+
 class Bucket(object):
     """An abstraction to reading and writing to a single key in an S3 bucket"""
 
