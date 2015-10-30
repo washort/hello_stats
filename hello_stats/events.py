@@ -99,10 +99,11 @@ class Event(object):
             return exception
 
     def __str__(self):
-        return '<%s %s by %s at %s>' % (
+        return '<%s %s by %s at %s%s>' % (
             self.__class__.__name__,
             self.token, 'clicker' if self.is_clicker else 'built-in',
-            self.timestamp)
+            self.timestamp,
+            (' exc=%s' % self.exception) if self.exception is not None else '')
 
     def __repr__(self):
         return self.__str__()

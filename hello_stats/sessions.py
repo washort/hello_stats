@@ -81,6 +81,12 @@ class Segment(object):
 
 
 class Participant(object):
+    """A slot for a person in a room
+
+    For instance, rooms have 1 slot for a link-clicker and 1 for a built-in
+    client.
+
+    """
     def __init__(self):
         self._clear_most()
         self._maybe_clear_rest()
