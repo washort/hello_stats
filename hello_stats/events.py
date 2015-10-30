@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, date
+import re
 
 
-BEGINNING_OF_TIME = date(2015, 9, 3)
+BEGINNING_OF_TIME = date(2015, 9, 5)
 
 # Number of seconds without network activity to allow before assuming a room
 # participant is timed out. When this many seconds goes by, they time out.
@@ -50,7 +51,7 @@ def events_from_day(iso_day, es, size=1000000):
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
         '_source': {'include': ['action', 'token', 'userType', 'state',
                                 'Timestamp', 'user_agent_browser',
-                                'user_agent_version']}
+                                'user_agent_version', 'event']}
     },
     index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
@@ -68,7 +69,8 @@ def events_from_day(iso_day, es, size=1000000):
             is_clicker=source['userType'] == 'Link-clicker',  # TODO: Make sure there's nothing invalid in this field.
             timestamp=decode_es_datetime(source['Timestamp']),
             browser=source.get('user_agent_browser', ''),
-            version=source.get('user_agent_version', 0))
+            version=source.get('user_agent_version', 0),
+            event=source.get('event') or '')
 
 
 class Event(object):
@@ -76,12 +78,25 @@ class Event(object):
     # progression through the room states, culminating in sendrecv. Everything
     # is pretty arbitrary except that SendRecv has the max.
 
-    def __init__(self, token, is_clicker, timestamp, browser=None, version=None):
+    def __init__(self, token, is_clicker, timestamp, browser=None, version=None, event=''):
         self.token = token
         self.is_clicker = is_clicker
         self.timestamp = timestamp
         self.browser = browser
         self.version = version if version else None  # int or None, never 0
+        self.exception = self._exception_from_event(event)  # int or None
+
+    def _exception_from_event(self, event):
+        match = re.match(r'sdk\.exception\.(\d+)', event)
+        if match:
+            exception = int(match.group(1))
+            if (not self.is_clicker
+                    and self.firefox_version == 41
+                    and exception == 1500):
+                # FF 41 overreports exception 1500 on the browser side. Treat
+                # it as if nothing went wrong.
+                return None
+            return exception
 
     def __str__(self):
         return '<%s %s by %s at %s>' % (
@@ -158,6 +173,14 @@ class Sending(Event):
 
 class SendRecv(Event):
     progression = 4  # must be the max
+
+
+class Success(object):
+    """Fake state used to represent getting to SendRecv without an exception"""
+
+    @classmethod
+    def name(cls):
+        return cls.__name__.lower()
 
 
 EVENT_CLASSES_BY_ACTION_AND_STATE = {

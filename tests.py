@@ -3,7 +3,7 @@ from unittest import TestCase
 
 from nose.tools import eq_, ok_
 
-from hello_stats.events import Join, Leave, Refresh, SendRecv, Sending, Starting, Timeout, Waiting
+from hello_stats.events import Join, Leave, Refresh, SendRecv, Sending, Starting, Success, Timeout, Waiting
 from hello_stats.sessions import Room, Segment, World
 
 
@@ -139,7 +139,7 @@ class FurthestStateTests(TestCase):
         world = World()
         segment = next(world.do(events))
         # They didn't both reach SendRecv:
-        eq_(segment.furthest_state(), SendRecv)
+        eq_(segment.furthest_state(), Success)
 
     def test_solo_segment(self):
         """Take the other user's states into account even if there's only 1
@@ -185,3 +185,51 @@ class FurthestStateTests(TestCase):
         world = World()
         last_segment = list(world.do(events))[-1]
         eq_(last_segment.furthest_state(), Starting)
+
+    def test_success(self):
+        """If we reach SendRecv without an exception, call it a Success."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40),
+            Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
+            SendRecv('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 2), 'Firefox', 40),
+            SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 3), 'Firefox', 40)]
+        world = World()
+        segment = next(world.do(events))
+        # They didn't both reach SendRecv:
+        eq_(segment.furthest_state(), Success)
+
+    def test_success_ff_41(self):
+        """FF 41 overreports exception 1500, so ignore it."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 41),
+            Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
+            SendRecv('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 2), 'Firefox', 41, 'sdk.exception.1500.yeah'),
+            SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 3), 'Firefox', 40)]
+        world = World()
+        segment = next(world.do(events))
+        # They didn't both reach SendRecv:
+        eq_(segment.furthest_state(), Success)
+
+    def test_failure(self):
+        """An exception should keep us from reaching Success."""
+        events = [
+            Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40),
+            Join('a', CLICKER, datetime(2015, 1, 1, 0, 0, 1), 'Firefox', 40),
+            SendRecv('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 2), 'Firefox', 40),
+            SendRecv('a', CLICKER, datetime(2015, 1, 1, 0, 0, 3), 'Firefox', 40, 'sdk.exception.123')]
+        world = World()
+        segment = next(world.do(events))
+        eq_(segment.furthest_state(), SendRecv)
+
+
+def test_exception_from_event():
+    """Make sure exception numbers are extracted properly from the ``event``
+    field."""
+    eq_(Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40, 'sdk.exception.1500.blah').exception,
+        1500)
+    eq_(Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40, '').exception,
+        None)
+    eq_(Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 41, 'sdk.exception.1500.blah').exception,
+        None)
+    eq_(Join('a', BUILT_IN, datetime(2015, 1, 1, 0, 0, 0), 'Firefox', 40, 'some trash').exception,
+        None)

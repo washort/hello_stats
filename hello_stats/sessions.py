@@ -4,7 +4,7 @@ from datetime import datetime
 from itertools import groupby
 from pprint import pformat
 
-from hello_stats.events import EVENT_CLASSES_WORST_FIRST, PROGRESSION_TO_EVENT_CLASS, Leave, Timeout, TIMEOUT_DURATION
+from hello_stats.events import PROGRESSION_TO_EVENT_CLASS, Leave, SendRecv, Success, Timeout, TIMEOUT_DURATION
 
 
 class Segment(object):
@@ -68,11 +68,16 @@ class Segment(object):
                 # This happens less than once in 1000 sessions.
                 print 'No common states between built-in and clicker. This may be due to timing slop. Going with max state.'
                 states = self._clicker_states | self._built_in_states
-        return PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
+        furthest = PROGRESSION_TO_EVENT_CLASS[max(s.progression for s in states)]
+
+        # If there's no exception, it's a full Success:
+        if furthest is SendRecv and not any(e.exception for e in self):
+            furthest = Success
+        return furthest
 
     def is_failure(self):
         """Return whether I have failed."""
-        return self.furthest_state() is not SendRecv
+        return self.furthest_state() is not Success
 
 
 class Participant(object):
