@@ -32,7 +32,7 @@ from os.path import dirname, join
 
 from pyelasticsearch import ElasticSearch, ElasticHttpNotFoundError
 
-from hello_stats.events import BEGINNING_OF_TIME, EVENT_CLASSES_WORST_FIRST, events_from_day
+from hello_stats.events import BEGINNING_OF_TIME, EVENT_CLASSES_WORST_FIRST, events_from_day, SendRecv
 from hello_stats.sessions import World
 from hello_stats.storage import VERSION, PickleBucket, VersionedJsonBucket
 
@@ -83,11 +83,16 @@ def days_between(start, end):
 def counts_for_day(segments):
     """Return a StateCounter conveying a histogram of the segments' furthest
     states."""
-    counter = StateCounter(c.name() for c in EVENT_CLASSES_WORST_FIRST)
+    counts = StateCounter(c.name() for c in EVENT_CLASSES_WORST_FIRST)
+    exc_counts = StateCounter()
     for segment in segments:
         furthest = segment.furthest_state()
-        counter.incr(furthest.name())
-    return counter
+        counts.incr(furthest.name())
+        if furthest is SendRecv:
+            exc_counts.incr(segment.exception())
+            if segment.exception() == 2001:
+                print next((event.is_clicker for event in segment if event.exception is not None), None)
+    return counts, exc_counts
 
 
 def success_duration_histogram(segments):
@@ -164,11 +169,12 @@ def update_metrics(es, version, metrics, world):
 
         try:
             segments = world.do(events_from_day(iso_day, es))
-            counts = counts_for_day(segments)
+            counts, exc_counts = counts_for_day(segments)
         except ElasticHttpNotFoundError:
             print 'Index not found. Proceeding to next day.'
             continue
         print counts
+        print exc_counts
         print "%s sessions span midnight (%s%%)." % (len(world._rooms), len(world._rooms) / float(counts.total) * 100)
         a_days_metrics = counts.as_dict()
         a_days_metrics['date'] = iso_day

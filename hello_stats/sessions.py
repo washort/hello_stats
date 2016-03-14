@@ -9,8 +9,11 @@ from hello_stats.events import PROGRESSION_TO_EVENT_CLASS, Leave, SendRecv, Succ
 
 class Segment(object):
     """An iterable of events, plus some metadata about the collection as a
-    whole"""
+    whole
 
+    See deeper explanation as part of the docstring for World.
+
+    """
     def __init__(self, events=None):
         """
         :arg events: A list of events for me to encompass
@@ -78,6 +81,10 @@ class Segment(object):
     def is_failure(self):
         """Return whether I have failed."""
         return self.furthest_state() is not Success
+
+    def exception(self):
+        """Return the first exception encountered in me."""
+        return next((event.exception for event in self if event.exception is not None), None)
 
 
 class Participant(object):
