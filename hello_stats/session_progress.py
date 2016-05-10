@@ -5,7 +5,8 @@ bucket so a dashboard can pull it out.
 
 Usage::
 
-    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py [--no-publish]
+    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py \
+      [--no-publish] [--beginning-of-time YYYY-MM-DD]
 
 Specifically, for each set of overlapping join-leave spans in a room, what is
 the furthest state the link-clicker and the built-in client both reach? We emit
@@ -136,7 +137,7 @@ def failure_duration_histogram(segments):
             yield "Inconceivable!"
 
 
-def update_metrics(es, version, metrics, world):
+def update_metrics(es, version, metrics, world, beginning_of_time):
     """Update metrics with today's (and previous missed days') data.
 
     Also update the state of the ``world`` with sessions that may hang over
@@ -149,7 +150,7 @@ def update_metrics(es, version, metrics, world):
     yesterday = today - timedelta(days=1)
 
     if not metrics or VERSION > version:  # need to start over
-        start_at = BEGINNING_OF_TIME
+        start_at = beginning_of_time
         metrics = []
         world = World()
     else:
@@ -178,9 +179,21 @@ def update_metrics(es, version, metrics, world):
     return metrics, world
 
 
+def valid_date(s):
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return argparse.ArgumentTypeError("Not a valid date: %s" % s)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Loop locale chrome manifest generation script")
+    parser.add_argument("-b", "--beginning-of-time",
+                        default=BEGINNING_OF_TIME,
+                        type=valid_date,
+                        help="The start date for the beginning of metrics processing, "
+                        "currently %s. Format YYYY-MM-DD" % BEGINNING_OF_TIME.isoformat())
     parser.add_argument("--no-publish",
                         default=False,
                         action="store_true",
@@ -224,7 +237,7 @@ def main():
             world = None
             metrics = []
 
-    metrics, world = update_metrics(es, version, metrics, world)
+    metrics, world = update_metrics(es, version, metrics, world, args.beginning_of_time)
 
     if not args.no_publish:
         # Write back to the buckets:
