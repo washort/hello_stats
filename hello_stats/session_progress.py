@@ -5,7 +5,8 @@ bucket so a dashboard can pull it out.
 
 Usage::
 
-    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py
+    ES_URL=... ES_USERNAME=... ES_PASSWORD=... python state_histogram.py \
+      [--no-publish] [--beginning-of-time YYYY-MM-DD]
 
 Specifically, for each set of overlapping join-leave spans in a room, what is
 the furthest state the link-clicker and the built-in client both reach? We emit
@@ -35,6 +36,7 @@ from pyelasticsearch import ElasticSearch, ElasticHttpNotFoundError
 from hello_stats.events import BEGINNING_OF_TIME, EVENT_CLASSES_WORST_FIRST, events_from_day
 from hello_stats.sessions import World
 from hello_stats.storage import VERSION, PickleBucket, VersionedJsonBucket
+import argparse
 
 
 class StateCounter(object):
@@ -135,7 +137,7 @@ def failure_duration_histogram(segments):
             yield "Inconceivable!"
 
 
-def update_metrics(es, version, metrics, world):
+def update_metrics(es, version, metrics, world, beginning_of_time):
     """Update metrics with today's (and previous missed days') data.
 
     Also update the state of the ``world`` with sessions that may hang over
@@ -148,7 +150,7 @@ def update_metrics(es, version, metrics, world):
     yesterday = today - timedelta(days=1)
 
     if not metrics or VERSION > version:  # need to start over
-        start_at = BEGINNING_OF_TIME
+        start_at = beginning_of_time
         metrics = []
         world = World()
     else:
@@ -177,7 +179,27 @@ def update_metrics(es, version, metrics, world):
     return metrics, world
 
 
+def valid_date(s):
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return argparse.ArgumentTypeError("Not a valid date: %s" % s)
+
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="Loop locale chrome manifest generation script")
+    parser.add_argument("-b", "--beginning-of-time",
+                        default=BEGINNING_OF_TIME,
+                        type=valid_date,
+                        help="The start date for the beginning of metrics processing, "
+                        "currently %s. Format YYYY-MM-DD" % BEGINNING_OF_TIME.isoformat())
+    parser.add_argument("--no-publish",
+                        default=False,
+                        action="store_true",
+                        help="Don't try to publish the metrics output")
+    args = parser.parse_args()
+
     """Pull the JSON of the historical metrics out of S3, compute the new ones
     up through yesterday, and write them back to S3.
 
@@ -192,29 +214,35 @@ def main():
                        ca_certs=join(dirname(__file__), 'mozilla-root.crt'),
                        timeout=600)
 
-    # Get previous metrics and midnight-spanning room state from buckets:
-    metrics_bucket = VersionedJsonBucket(
-        bucket_name='net-mozaws-prod-metrics-data',
-        key='loop-server-dashboard/loop_full_room_progress.json',
-        access_key_id=environ['METRICS_ACCESS_KEY_ID'],
-        secret_access_key=environ['METRICS_SECRET_ACCESS_KEY'])
-    version, metrics = metrics_bucket.read()
-    world_bucket = PickleBucket(
-        bucket_name='mozilla-loop-metrics-state',
-        key='session-progress.pickle',
-        access_key_id=environ['STATE_ACCESS_KEY_ID'],
-        secret_access_key=environ['STATE_SECRET_ACCESS_KEY'])
-    try:
-        world = world_bucket.read()
-    except (UnpicklingError, AttributeError):
+    if args.no_publish:
         world = None
+        version = None
         metrics = []
+    else:
+        # Get previous metrics and midnight-spanning room state from buckets:
+        metrics_bucket = VersionedJsonBucket(
+            bucket_name='net-mozaws-prod-metrics-data',
+            key='loop-server-dashboard/loop_full_room_progress.json',
+            access_key_id=environ['METRICS_ACCESS_KEY_ID'],
+            secret_access_key=environ['METRICS_SECRET_ACCESS_KEY'])
+        version, metrics = metrics_bucket.read()
+        world_bucket = PickleBucket(
+            bucket_name='mozilla-loop-metrics-state',
+            key='session-progress.pickle',
+            access_key_id=environ['STATE_ACCESS_KEY_ID'],
+            secret_access_key=environ['STATE_SECRET_ACCESS_KEY'])
+        try:
+            world = world_bucket.read()
+        except (UnpicklingError, AttributeError):
+            world = None
+            metrics = []
 
-    metrics, world = update_metrics(es, version, metrics, world)
+    metrics, world = update_metrics(es, version, metrics, world, args.beginning_of_time)
 
-    # Write back to the buckets:
-    world_bucket.write(world)
-    metrics_bucket.write(metrics)
+    if not args.no_publish:
+        # Write back to the buckets:
+        world_bucket.write(world)
+        metrics_bucket.write(metrics)
 
 
 if __name__ == '__main__':
