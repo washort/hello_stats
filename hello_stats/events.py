@@ -19,13 +19,11 @@ def decode_es_datetime(es_datetime):
         return datetime.strptime(es_datetime, '%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def events_from_day(iso_day, es, size=1000000):
-    """Return all Events from the given day, in order by room token and then
-    timestamp."""
+def hits_from_day(iso_day, es, size):
     # Optimize: Can I do this with aggregations and/or scripts or at least use
     # aggs to reduce it to rooms that ever have 2 people (whether
     # simultaneously or not) in them?
-    hits = es.search({
+    return es.search({
         'query': {
             'filtered': {
                 'query': {
@@ -51,11 +49,16 @@ def events_from_day(iso_day, es, size=1000000):
         'size': size,  # TODO: Slice nicely. As is, we get only 100K hits in a day, so YAGNI.
         '_source': {'include': ['action', 'token', 'userType', 'state',
                                 'Timestamp', 'user_agent_browser',
-                                'user_agent_version', 'event']}
+                                'user_agent_version', 'event', 'sessionId', 'Uuid', 'hostname', 'roomConnectionId', 'participants', 'token', 'user_agent_os']}
     },
     index='loop-app-logs-%s' % iso_day,
     doc_type='request.summary')['hits']['hits']
 
+
+def events_from_day(iso_day, es, size=1000000):
+    """Return all Events from the given day, in order by room token and then
+    timestamp."""
+    hits = hits_from_day(iso_day, es, size)
     for hit in hits:
         source = hit['_source']
         action_and_state = source.get('action'), source.get('state')
@@ -70,6 +73,7 @@ def events_from_day(iso_day, es, size=1000000):
             timestamp=decode_es_datetime(source['Timestamp']),
             browser=source.get('user_agent_browser', ''),
             version=source.get('user_agent_version', 0),
+            session_id=source.get('sessionId'),
             event=source.get('event') or '')
 
 
@@ -78,13 +82,15 @@ class Event(object):
     # progression through the room states, culminating in sendrecv. Everything
     # is pretty arbitrary except that SendRecv has the max.
 
-    def __init__(self, token, is_clicker, timestamp, browser=None, version=None, event=''):
+    def __init__(self, token, is_clicker, timestamp, session_id=None,
+                 browser=None, version=None, event=''):
         self.token = token
         self.is_clicker = is_clicker
         self.timestamp = timestamp
         self.browser = browser
         self.version = version if version else None  # int or None, never 0
         self.exception = self._exception_from_event(event)  # int or None
+        self.session_id = session_id
 
     def _exception_from_event(self, event):
         match = re.match(r'sdk\.exception\.(\d+)', event)

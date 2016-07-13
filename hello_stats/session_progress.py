@@ -88,7 +88,7 @@ def counts_for_day(segments):
     counter = StateCounter(c.name() for c in EVENT_CLASSES_WORST_FIRST)
     for segment in segments:
         furthest = segment.furthest_state()
-        counter.incr(furthest.name())
+        counter.incr((furthest.name(), "foo"))
     return counter
 
 
