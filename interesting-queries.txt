@@ -1,0 +1,32 @@
+-- => \d loop_sessions
+--             Table "public.loop_sessions"
+--      Column     |          Type          | Modifiers 
+-- ----------------+------------------------+-----------
+--  session_id     | character varying(255) | 
+--  furthest_state | character varying(31)  | 
+
+-- => \d tokbox_log
+--                 Table "public.tokbox_log"
+--     Column     |            Type             | Modifiers 
+-- ---------------+-----------------------------+-----------
+--  session_id    | character varying(255)      | 
+--  component     | character varying(31)       | 
+--  connection_id | uuid                        | 
+--  event_name    | character varying(63)       | 
+--  timestamp     | timestamp without time zone | 
+--  extra         | jsonb                       | 
+
+
+-- collect loop idea of state vs tokbox idea of state
+SELECT s.session_id,
+       s.furthest_state,
+       COUNT(DISTINCT t.extra -> 'source') FILTER (WHERE t.event_name='subscribe_success') AS successes,
+       COUNT(DISTINCT t.extra -> 'source') FILTER (WHERE t.event_name='subscribe_failure') AS failures
+    FROM loop_sessions AS s JOIN tokbox_log AS t ON (s.session_id = t.session_id)
+    GROUP BY s.session_id
+    ORDER BY s.session_id;
+
+-- Display success/failure events and parties in a single session
+SELECT component, event_name, timestamp, extra -> 'source' AS source FROM tokbox_log
+       WHERE session_id = '1_MX40NTU1MjE1Mn5-MTQ2NzEwNjE2MzY0NX5kUHBkSjBKMlNDeEFEeFd2RnU5RGdXSWF-UH4'
+             AND (event_name = 'subscribe_success' OR event_name = 'subscribe_failure');
