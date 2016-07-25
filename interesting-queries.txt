@@ -30,3 +30,27 @@ SELECT s.session_id,
 SELECT component, event_name, timestamp, extra -> 'source' AS source FROM tokbox_log
        WHERE session_id = '1_MX40NTU1MjE1Mn5-MTQ2NzEwNjE2MzY0NX5kUHBkSjBKMlNDeEFEeFd2RnU5RGdXSWF-UH4'
              AND (event_name = 'subscribe_success' OR event_name = 'subscribe_failure');
+
+
+-- Find 'success' sessions where tokbox didn't report two successful subscribing
+-- parties
+SELECT s.session_id, tt.successes
+    FROM loop_sessions AS s,
+        (SELECT t.session_id, COUNT(DISTINCT t.extra -> 'source') AS successes
+         FROM tokbox_log as t
+         WHERE t.event_name = 'subscribe_success' GROUP BY t.session_id) AS tt
+    WHERE tt.session_id = s.session_id AND tt.successes != 2
+    AND s.furthest_state = 'success';
+
+
+-- Find 'sendrecv' sessions where tokbox reported two successful subscribing
+-- parties
+SELECT s.session_id, tt.successes, tt.start, tt.end, s.furthest_state
+    FROM loop_sessions AS s,
+        (SELECT t.session_id, min(t.timestamp) as start, max(t.timestamp) as end,
+        COUNT(DISTINCT t.extra -> 'source') AS successes
+         FROM tokbox_log as t
+         WHERE t.event_name = 'subscribe_success' GROUP BY t.session_id) AS tt
+    WHERE tt.session_id = s.session_id AND tt.successes = 2 AND s.furthest_state != 'success'
+    ORDER BY start;
+
